@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "node"
+    ],
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    }
+  },
+  "include": [
+    "model.ts",
+    "jobscript.ts",
+    "slots.ts",
+    "ledger.ts",
+    "seed.ts",
+    "host.ts",
+    "server.ts",
+    "runner.ts",
+    "app.tsx",
+    "i18n.ts",
+    "components",
+    "lib",
+    "hooks",
+    "tests"
+  ]
+}
