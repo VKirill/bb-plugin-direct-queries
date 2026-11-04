@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { createRunner, type HostPort, type Store, type StoredRun } from "../runner.ts";
-import type { Project, Settings } from "../model.ts";
-import { fixtureProjects, fixtureSettings } from "./fixtures/projects.ts";
+import type { LedgerRow, Project, Settings } from "../model.ts";
+import { fixturePipelineProject, fixtureProjects, fixtureSettings } from "./fixtures/projects.ts";
 
 class MemStore implements Store {
   map = new Map<string, unknown>();
@@ -240,6 +240,34 @@ describe("morning line", () => {
     at("2026-11-05T06:00:00Z");
     await again.tick();
     expect(host.notifies).toHaveLength(2);
+  });
+});
+
+describe("built-in pipeline schedule", () => {
+  it("starts the pipeline in-process at 03:00 MSK with no host job", async () => {
+    const store = new MemStore();
+    const host = new FakeHost();
+    const started: string[] = [];
+    seq = 0;
+    const runner = createRunner({
+      store,
+      host,
+      now: () => currentNow,
+      newRunId: () => `run-${++seq}`,
+      pipeline: {
+        run: async (project, day) => {
+          started.push(`${project.id}:${day}`);
+          return [] as LedgerRow[];
+        },
+        sync: async () => [],
+      },
+    });
+    await store.set("projects", [fixturePipelineProject()]);
+    await store.set("settings", fixtureSettings());
+    at(T0300);
+    await runner.tick();
+    expect(host.started).toHaveLength(0);
+    expect(started).toEqual(["gamma:2026-11-03"]);
   });
 });
 
