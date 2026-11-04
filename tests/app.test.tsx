@@ -17,6 +17,9 @@ vi.mock("@get-bb/plugin-sdk/app", () => ({
       return routes[method]?.(input);
     },
   }),
+  useRealtime: () => undefined,
+  experimental_usePluginId: () => "direct-queries",
+  experimental_copyToClipboard: async () => true,
 }));
 
 import { Page } from "../app.tsx";

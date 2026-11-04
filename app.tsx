@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { definePluginApp, useRpc } from "@get-bb/plugin-sdk/app";
+import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server.ts";
 import type { LedgerRow, Project, Settings } from "./model.ts";
 import { useStrings } from "./i18n.ts";
@@ -9,7 +9,12 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableRow, TableCell } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
+import { AccountsTab } from "@/components/accounts.tsx";
+import { KeysPanel } from "@/components/keys.tsx";
+import { PipelineForm } from "@/components/pipeline-form.tsx";
 import "./app.css";
+
+type Tab = "dashboard" | "projects" | "accounts" | "settings";
 
 type Cell = { day: string; status: string };
 type OverviewJob = {
@@ -50,7 +55,7 @@ const STATUS_GLYPH: Record<string, string> = {
 export function Page() {
   const rpc = useRpc<typeof rpcContract>();
   const t = useStrings();
-  const [tab, setTab] = useState<"dashboard" | "projects" | "settings">("dashboard");
+  const [tab, setTab] = useState<Tab>("dashboard");
   const [ov, setOv] = useState<Overview | null>(null);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<Selected | null>(null);
@@ -59,22 +64,30 @@ export function Page() {
     rpc.call("overview", { days: 7 }).then((d) => setOv(d as Overview), (e) => setError(String(e)));
   }, [rpc]);
   useEffect(reload, [reload]);
+  useRealtime("changed", reload);
+
+  const tabLabel: Record<Tab, string> = {
+    dashboard: t.dashboardTab,
+    projects: t.projectsTab,
+    accounts: t.accountsTab,
+    settings: t.settingsTab,
+  };
 
   return (
     <div className="dq-root">
-      <header className="dq-header">
+      <header className="dq-strip">
         <h1>{t.title}</h1>
-        <nav className="dq-tabs">
-          {(["dashboard", "projects", "settings"] as const).map((k) => (
-            <Button
+        <nav className="dq-seg dq-tabs">
+          {(["dashboard", "projects", "accounts", "settings"] as const).map((k) => (
+            <button
               key={k}
-              variant={tab === k ? "secondary" : "ghost"}
-              size="sm"
+              type="button"
+              className="dq-seg-item"
               aria-pressed={tab === k}
               onClick={() => setTab(k)}
             >
-              {k === "dashboard" ? t.dashboardTab : k === "projects" ? t.projectsTab : t.settingsTab}
-            </Button>
+              {tabLabel[k]}
+            </button>
           ))}
         </nav>
       </header>
@@ -83,6 +96,7 @@ export function Page() {
         <Dashboard t={t} ov={ov} onPick={setSelected} onRerun={(p, j) => void rpc.call("run", { projectId: p, jobId: j }).then(reload)} onOpenProjects={() => setTab("projects")} />
       )}
       {tab === "projects" && <Projects t={t} rpc={rpc} />}
+      {tab === "accounts" && <AccountsTab t={t} rpc={rpc} />}
       {tab === "settings" && <SettingsTab t={t} rpc={rpc} />}
       {selected && <RunPanel t={t} rpc={rpc} sel={selected} onClose={() => setSelected(null)} />}
     </div>
@@ -186,7 +200,7 @@ function RunPanel({
       );
   }, [rpc, sel]);
   return (
-    <aside className="dq-panel">
+    <aside className="dq-drawer">
       <header>
         <h2>
           {sel.project.site} · {sel.job.title} · {sel.day}
@@ -222,6 +236,7 @@ function RunPanel({
 
 function Projects({ t, rpc }: { t: ReturnType<typeof useStrings>; rpc: ReturnType<typeof useRpc<typeof rpcContract>> }) {
   const [list, setList] = useState<Project[] | null>(null);
+  const [creating, setCreating] = useState(false);
   const reload = useCallback(() => {
     rpc.call("projects.list", null).then((r) => setList(r as Project[]));
   }, [rpc]);
@@ -231,26 +246,36 @@ function Projects({ t, rpc }: { t: ReturnType<typeof useStrings>; rpc: ReturnTyp
     rpc.call("projects.setEnabled", { projectId, jobId, enabled }).then(reload);
   return (
     <div className="dq-section">
-      {list.map((p) => (
-        <section key={p.id} className="dq-card">
-          <header className="dq-card-head">
-            <div>
-              <h3>{p.title}</h3>
-              <p className="dq-sub">
-                {p.site} · {p.hostId} · {p.cwd}
-              </p>
-            </div>
-            <Switch checked={p.enabled} onCheckedChange={(v) => void toggle(p.id, undefined, v)} aria-label={`${p.site} ${t.enabled}`} />
-          </header>
-          {p.jobs.map((j) => (
-            <div key={j.id} className="dq-job-row">
-              <span>{j.title} <code>{j.id}</code></span>
-              <Switch checked={j.enabled} onCheckedChange={(v) => void toggle(p.id, j.id, v)} aria-label={`${j.id} ${t.enabled}`} />
-            </div>
-          ))}
-          <ProjectJson t={t} rpc={rpc} p={p} onSaved={reload} />
-        </section>
-      ))}
+      <div className="dq-actions">
+        <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
+          {t.newPipeline}
+        </Button>
+      </div>
+      {creating && <PipelineForm t={t} rpc={rpc} onSaved={() => { setCreating(false); reload(); }} />}
+      {list.map((p) =>
+        p.pipeline ? (
+          <PipelineForm key={p.id} t={t} rpc={rpc} project={p} onSaved={reload} />
+        ) : (
+          <section key={p.id} className="dq-card">
+            <header className="dq-card-head">
+              <div>
+                <h3>{p.title}</h3>
+                <p className="dq-sub">
+                  {p.site} · {p.hostId} · {p.cwd}
+                </p>
+              </div>
+              <Switch checked={p.enabled} onCheckedChange={(v) => void toggle(p.id, undefined, v)} aria-label={`${p.site} ${t.enabled}`} />
+            </header>
+            {p.jobs.map((j) => (
+              <div key={j.id} className="dq-job-row">
+                <span>{j.title} <code>{j.id}</code></span>
+                <Switch checked={j.enabled} onCheckedChange={(v) => void toggle(p.id, j.id, v)} aria-label={`${j.id} ${t.enabled}`} />
+              </div>
+            ))}
+            <ProjectJson t={t} rpc={rpc} p={p} onSaved={reload} />
+          </section>
+        ),
+      )}
     </div>
   );
 }
@@ -307,46 +332,62 @@ function SettingsTab({ t, rpc }: { t: ReturnType<typeof useStrings>; rpc: Return
   }, [rpc]);
   if (s === null) return <Skeleton className="dq-skel" />;
   const m = s.morningLine;
+  const tg = s.telegram ?? { enabled: false, chatId: "" };
   const upd = (next: Partial<Settings["morningLine"]>) =>
     setS({ ...s, morningLine: { ...m, ...next } });
+  const updTg = (next: Partial<Settings["telegram"]>) =>
+    setS({ ...s, telegram: { ...tg, ...next } });
   return (
     <div className="dq-section">
-      <section className="dq-card">
-        <h3>{t.morningLine}</h3>
-        <div className="dq-field">
-          <Label>{t.enabled}</Label>
-          <Switch checked={m.enabled} onCheckedChange={(v) => upd({ enabled: v })} />
+      <KeysPanel t={t} rpc={rpc} />
+      <section className="dq-panel">
+        <div className="dq-panel-head">
+          <h3>{t.morningLine}</h3>
         </div>
-        <div className="dq-field">
-          <Label>{t.morningHost}</Label>
-          <Input value={m.hostId} onChange={(e) => upd({ hostId: e.target.value })} />
+        <div className="dq-panel-body">
+          <div className="dq-field">
+            <Label>{t.telegramEnabled}</Label>
+            <Switch checked={tg.enabled} onCheckedChange={(v) => updTg({ enabled: v })} />
+          </div>
+          <div className="dq-field">
+            <Label>{t.telegramChat}</Label>
+            <Input value={tg.chatId} onChange={(e) => updTg({ chatId: e.target.value })} />
+          </div>
+          <div className="dq-field">
+            <Label>{t.enabled}</Label>
+            <Switch checked={m.enabled} onCheckedChange={(v) => upd({ enabled: v })} />
+          </div>
+          <div className="dq-field">
+            <Label>{t.morningHost}</Label>
+            <Input value={m.hostId} onChange={(e) => upd({ hostId: e.target.value })} />
+          </div>
+          <div className="dq-field">
+            <Label>{t.morningCommand}</Label>
+            <Input value={m.command} onChange={(e) => upd({ command: e.target.value })} />
+          </div>
+          <div className="dq-field">
+            <Label>{t.morningHour}</Label>
+            <Input
+              type="number"
+              min={0}
+              max={23}
+              value={m.hour}
+              onChange={(e) => upd({ hour: Number(e.target.value) })}
+            />
+          </div>
+          <div className="dq-actions">
+            <Button onClick={() => void rpc.call("settings.save", s).then((r) => setS(r as Settings))}>
+              {t.save}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void rpc.call("morning.preview", null).then((r) => setPreview((r as { text: string }).text))}
+            >
+              {t.preview}
+            </Button>
+          </div>
+          {preview && <pre className="dq-preview">{preview}</pre>}
         </div>
-        <div className="dq-field">
-          <Label>{t.morningCommand}</Label>
-          <Input value={m.command} onChange={(e) => upd({ command: e.target.value })} />
-        </div>
-        <div className="dq-field">
-          <Label>{t.morningHour}</Label>
-          <Input
-            type="number"
-            min={0}
-            max={23}
-            value={m.hour}
-            onChange={(e) => upd({ hour: Number(e.target.value) })}
-          />
-        </div>
-        <div className="dq-actions">
-          <Button onClick={() => void rpc.call("settings.save", s).then((r) => setS(r as Settings))}>
-            {t.save}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => void rpc.call("morning.preview", null).then((r) => setPreview((r as { text: string }).text))}
-          >
-            {t.preview}
-          </Button>
-        </div>
-        {preview && <pre className="dq-preview">{preview}</pre>}
       </section>
     </div>
   );
