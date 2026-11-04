@@ -1,4 +1,4 @@
-import type { Project } from "./model.ts";
+import { jobsOf, type Project } from "./model.ts";
 
 export type Due = {
   projectId: string;
@@ -63,7 +63,7 @@ export function dueSlots(
     const m = moscowParts(t);
     for (const p of projects) {
       if (!p.enabled) continue;
-      for (const j of p.jobs) {
+      for (const j of jobsOf(p)) {
         if (!j.enabled || !j.weekdays.includes(m.weekday)) continue;
         if (m.minute !== j.minute) continue;
         const day = j.reportDay === "yesterday" ? addDays(m.date, -1) : m.date;

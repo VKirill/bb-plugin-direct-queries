@@ -174,6 +174,32 @@ export function fixtureSettings(): Settings {
       command: "notify-send {file}",
       hour: 9,
     },
+    telegram: { enabled: false, chatId: "" },
     timeZone: "Europe/Moscow",
+  };
+}
+
+export function fixturePipelineProject(): Project {
+  return {
+    id: "gamma",
+    title: "gamma.example",
+    site: "gamma.example",
+    enabled: true,
+    jobs: [],
+    pipeline: {
+      accountId: "acc-gamma",
+      sheetId: "sheet-gamma",
+      profile: {
+        site: "https://gamma.example/",
+        company: "Gamma",
+        buyer: "Buyers",
+        offers: ["Offer"],
+        advertising_goal: "Orders",
+        boundaries: ["Off-topic"],
+      },
+      serp: { enabled: true, budget: 25, lr: 225, device: "desktop" },
+      library: { enabled: true, apply: true },
+      schedule: { hour: 3, catchUpHours: [4, 6, 9, 12], syncHours: [0, 4, 8, 12, 16, 20] },
+    },
   };
 }

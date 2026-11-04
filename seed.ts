@@ -13,6 +13,7 @@ export function seedSettings(): Settings {
       hour: 9,
       command: "",
     },
+    telegram: { enabled: false, chatId: "" },
     timeZone: "Europe/Moscow",
   };
 }

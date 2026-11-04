@@ -15,6 +15,32 @@ import {
 import { seedProjects, seedSettings } from "./seed.ts";
 import { addDays, moscowParts } from "./slots.ts";
 import { morningLine } from "./ledger.ts";
+import {
+  cachePort,
+  consumeOauthState,
+  getAccount,
+  listAccounts,
+  listFeedback,
+  listJudgements,
+  listQueries,
+  MIGRATIONS,
+  publicAccount,
+  putOauthState,
+  removeAccount,
+  replaceFeedback,
+  replaceQueries,
+  upsertAccount,
+  upsertJudgements,
+} from "./db.ts";
+import { createSecrets, type SecretName } from "./secrets.ts";
+import { runLibrarySync, runPipeline, type PipelineDeps } from "./pipeline.ts";
+import { authorizeUrl, exchangeCode, refreshToken, userInfo, ensureFresh } from "./yandex-oauth.ts";
+import { createDirectClient } from "./direct.ts";
+import { createSheetsClient } from "./sheets.ts";
+import { createJudge } from "./judge.ts";
+import { createSerp } from "./serp.ts";
+import { applyLibrarySync, planLibrarySync, phrase } from "./library.ts";
+import { suggestPhrases } from "./negatives.ts";
 
 const importPayloadSchema = z.object({
   projects: z.array(projectSchema),
@@ -44,6 +70,14 @@ export async function importConfig(
   if (parsed.settings !== undefined) await store.set("settings", parsed.settings);
   return { imported: parsed.projects.map((p) => p.id) };
 }
+
+const accountPublicSchema = z.object({
+  id: z.string(),
+  login: z.string(),
+  displayName: z.string().optional(),
+  isAgency: z.boolean(),
+  expiresAt: z.number(),
+});
 
 export const rpcContract = defineRpcContract({
   overview: {
@@ -87,10 +121,202 @@ export const rpcContract = defineRpcContract({
   "settings.get": { input: z.null(), output: settingsSchema },
   "settings.save": { input: settingsSchema, output: settingsSchema },
   "morning.preview": { input: z.null(), output: z.object({ text: z.string() }) },
+  "accounts.list": { input: z.null(), output: z.array(accountPublicSchema) },
+  "accounts.remove": { input: z.object({ accountId: z.string() }), output: z.boolean() },
+  "accounts.clients": {
+    input: z.object({ accountId: z.string() }),
+    output: z.array(z.object({ Login: z.string(), ClientInfo: z.string().optional() })),
+  },
+  "accounts.campaigns": {
+    input: z.object({ accountId: z.string(), clientLogin: z.string().optional() }),
+    output: z.unknown(),
+  },
+  "oauth.redirectUri": { input: z.null(), output: z.object({ uri: z.string() }) },
+  "secrets.status": {
+    input: z.null(),
+    output: z.record(z.string(), z.boolean()),
+  },
+  "pipeline.run": {
+    input: z.object({
+      projectId: z.string(),
+      day: z.string().optional(),
+      dryRun: z.boolean().optional(),
+    }),
+    output: z.object({ runId: z.string(), day: z.string() }),
+  },
+  "pipeline.preview": {
+    input: z.object({ projectId: z.string(), day: z.string().optional() }),
+    output: z.object({ runId: z.string(), day: z.string() }),
+  },
 });
+
+const oauthRedirectUri = (bb: BbPluginApi): string => {
+  const origin = (bb.server.experimental_appUrl ?? bb.server.loopbackBaseUrl).replace(/\/$/, "");
+  return `${origin}/api/v1/plugins/${bb.pluginId}/http/oauth/callback`;
+};
+
+function liveDeps(
+  db: ReturnType<BbPluginApi["storage"]["database"]>,
+  secrets: ReturnType<typeof createSecrets>,
+): PipelineDeps {
+  const fetchFn = fetch;
+  const now = () => Date.now();
+  return {
+    now,
+    getSecret: (name: SecretName) => secrets.get(name),
+    getAccount: (id) => getAccount(db, id),
+    saveAccount: (account) => upsertAccount(db, account),
+    ensureFresh: async (account) => {
+      const clientId = await secrets.get("yandexClientId");
+      const clientSecret = await secrets.get("yandexClientSecret");
+      const tokens = await ensureFresh(
+        {
+          accessToken: account.accessToken,
+          refreshToken: account.refreshToken,
+          expiresAt: account.expiresAt,
+        },
+        now(),
+        (t) =>
+          refreshToken({
+            refreshToken: t.refreshToken,
+            clientId,
+            clientSecret,
+            fetch: fetchFn,
+          }),
+      );
+      return {
+        ...account,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        expiresAt: tokens.expiresAt,
+      };
+    },
+    searchQueryReport: async ({ token, clientLogin, date, campaignIds }) => {
+      const client = createDirectClient({ token, clientLogin, fetch: fetchFn });
+      return client.searchQueryReport({ dateFrom: date, dateTo: date, campaignIds });
+    },
+    listCampaigns: async ({ token, clientLogin }) => {
+      const client = createDirectClient({ token, clientLogin, fetch: fetchFn });
+      return client.campaigns();
+    },
+    loadQueries: (projectId, day) => listQueries(db, projectId, day),
+    saveQueries: (projectId, day, rows) => replaceQueries(db, projectId, day, rows),
+    loadJudgements: (projectId) => listJudgements(db, projectId),
+    saveJudgements: (rows) => upsertJudgements(db, rows),
+    saveFeedback: (rows) => {
+      if (rows[0]) replaceFeedback(db, rows[0].projectId, rows);
+    },
+    loadFeedback: (projectId) => listFeedback(db, projectId),
+    pullDecisions: async (sheetId) => {
+      const sheets = createSheetsClient({
+        clientId: await secrets.get("googleClientId"),
+        clientSecret: await secrets.get("googleClientSecret"),
+        refreshToken: await secrets.get("googleRefreshToken"),
+        fetch: fetchFn,
+      });
+      return sheets.pullDecisions(sheetId);
+    },
+    judgeQueries: async (profile, items, feedback) => {
+      const judge = createJudge({
+        openluxKey: await secrets.get("openluxKey"),
+        typesafeKey: await secrets.get("typesafeKey").catch(() => undefined),
+        fetch: fetchFn,
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        now,
+        cache: cachePort(db, "judge", now),
+      });
+      return judge.judgeQueries(profile, items, feedback);
+    },
+    reviewSerp: async (profile, rows) => {
+      const out = [];
+      const host = (() => {
+        try {
+          return new URL(profile.site).hostname;
+        } catch {
+          return profile.site;
+        }
+      })();
+      const serp = createSerp({
+        user: await secrets.get("xmlstockUser"),
+        key: await secrets.get("xmlstockKey"),
+        fetch: fetchFn,
+        cache: cachePort(db, "serp", now),
+        now,
+        budget: 25,
+        judge: createJudge({
+          openluxKey: await secrets.get("openluxKey"),
+          typesafeKey: await secrets.get("typesafeKey").catch(() => undefined),
+          fetch: fetchFn,
+          sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+          now,
+          cache: cachePort(db, "judge", now),
+        }),
+      });
+      for (const row of rows) {
+        const review = await serp.reviewItem(profile, row, host);
+        if (review) out.push(review);
+      }
+      return out;
+    },
+    suggestNegatives: async (queries) => {
+      const judge = createJudge({
+        openluxKey: await secrets.get("openluxKey"),
+        typesafeKey: await secrets.get("typesafeKey").catch(() => undefined),
+        fetch: fetchFn,
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        now,
+        cache: cachePort(db, "judge", now),
+      });
+      return suggestPhrases(queries, (q) => phrase(q), [], judge, cachePort(db, "neg", now));
+    },
+    publishDay: async (sheetId, date, rows) => {
+      const sheets = createSheetsClient({
+        clientId: await secrets.get("googleClientId"),
+        clientSecret: await secrets.get("googleClientSecret"),
+        refreshToken: await secrets.get("googleRefreshToken"),
+        fetch: fetchFn,
+      });
+      return sheets.publishDay(sheetId, date, rows);
+    },
+    syncLibrary: async ({ apply, approved, token, clientLogin }) => {
+      const client = createDirectClient({ token, clientLogin, fetch: fetchFn });
+      const campaigns = await client.campaigns();
+      const ids = campaigns.map((c) => c.Id);
+      const groups = ids.length ? await client.adGroups(ids) : [];
+      const sharedSets = await client.sharedSets();
+      const keywords = ids.length ? await client.keywords(ids) : [];
+      const plan = planLibrarySync({ campaigns, groups, sharedSets, keywords, approved });
+      return applyLibrarySync(client, plan, { apply });
+    },
+    refreshLibraryColumn: async (sheetId, inLibrary) => {
+      const sheets = createSheetsClient({
+        clientId: await secrets.get("googleClientId"),
+        clientSecret: await secrets.get("googleClientSecret"),
+        refreshToken: await secrets.get("googleRefreshToken"),
+        fetch: fetchFn,
+      });
+      await sheets.refreshLibraryColumn(sheetId, inLibrary);
+    },
+    listDirectInventory: async ({ token, clientLogin }) => {
+      const client = createDirectClient({ token, clientLogin, fetch: fetchFn });
+      const campaigns = await client.campaigns();
+      const ids = campaigns.map((c) => c.Id);
+      return {
+        campaigns,
+        groups: ids.length ? await client.adGroups(ids) : [],
+        sharedSets: await client.sharedSets(),
+        keywords: ids.length ? await client.keywords(ids) : [],
+      };
+    },
+  };
+}
 
 export default async function plugin(bb: BbPluginApi) {
   const store: Store = bb.storage.kv;
+  const db = bb.storage.database();
+  bb.storage.migrate(db, MIGRATIONS);
+  const secrets = createSecrets(bb);
+  const deps = liveDeps(db, secrets);
   const lifecycle = new AbortController();
   bb.onDispose(async () => {
     lifecycle.abort();
@@ -109,7 +335,30 @@ export default async function plugin(bb: BbPluginApi) {
       client.call("notify", input, opts(hostId)),
   };
 
-  const runner = createRunner({ store, host, now: () => Date.now(), newRunId: randomUUID });
+  const sendTelegram = async (text: string): Promise<void> => {
+    const token = await secrets.get("telegramBotToken");
+    const settings = (await store.get<Settings>("settings")) ?? seedSettings();
+    const chatId = settings.telegram?.chatId;
+    if (!chatId) throw new Error("telegram chatId missing");
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    });
+    if (!res.ok) throw new Error(`telegram ${res.status}`);
+  };
+
+  const runner = createRunner({
+    store,
+    host,
+    now: () => Date.now(),
+    newRunId: randomUUID,
+    pipeline: {
+      run: (project, day, runOpts) => runPipeline(deps, project, day, runOpts),
+      sync: (project, runOpts) => runLibrarySync(deps, project, runOpts),
+    },
+    sendTelegram,
+  });
 
   let queue: Promise<void> = Promise.resolve();
   const serial = <T>(fn: () => T | Promise<T>): Promise<T> => {
@@ -150,6 +399,76 @@ export default async function plugin(bb: BbPluginApi) {
     return morningLine(list, rows, yesterday);
   };
 
+  const directFor = async (accountId: string, clientLogin?: string) => {
+    const account = getAccount(db, accountId);
+    if (!account) throw new Error("accountMissing");
+    const fresh = await deps.ensureFresh(account);
+    upsertAccount(db, fresh);
+    return createDirectClient({ token: fresh.accessToken, clientLogin, fetch });
+  };
+
+  bb.http.route(
+    "GET",
+    "/oauth/start",
+    async (context) => {
+      const clientId = await secrets.get("yandexClientId");
+      const state = randomUUID();
+      putOauthState(db, state, Date.now());
+      const url = authorizeUrl({
+        clientId,
+        redirectUri: oauthRedirectUri(bb),
+        state,
+      });
+      return context.redirect(url, 302);
+    },
+    { auth: "local" },
+  );
+
+  bb.http.route(
+    "GET",
+    "/oauth/callback",
+    async (context) => {
+      const url = new URL(context.req.url);
+      const code = url.searchParams.get("code") ?? "";
+      const state = url.searchParams.get("state") ?? "";
+      if (!consumeOauthState(db, state, Date.now(), 10 * 60 * 1000)) {
+        return context.html("Invalid or expired OAuth state", 400);
+      }
+      const tokens = await exchangeCode({
+        code,
+        clientId: await secrets.get("yandexClientId"),
+        clientSecret: await secrets.get("yandexClientSecret"),
+        fetch,
+      });
+      const info = await userInfo({ accessToken: tokens.accessToken, fetch });
+      let isAgency = false;
+      try {
+        await createDirectClient({ token: tokens.accessToken, fetch }).agencyClients();
+        isAgency = true;
+      } catch {
+        isAgency = false;
+      }
+      const existing = listAccounts(db).find((a) => a.login === info.login);
+      upsertAccount(db, {
+        id: existing?.id ?? (info.id || randomUUID()),
+        login: info.login,
+        displayName: info.displayName,
+        isAgency,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        expiresAt: tokens.expiresAt,
+        createdAt: existing?.createdAt ?? Date.now(),
+      });
+      bb.realtime.publish("changed", { accounts: true });
+      const ru = `Аккаунт ${info.login} подключён, можно закрыть вкладку`;
+      const en = `Account ${info.login} connected, you can close this tab`;
+      const lang = context.req.header("accept-language") ?? "";
+      const body = lang.toLowerCase().includes("en") && !lang.toLowerCase().includes("ru") ? `${en}<br>${ru}` : `${ru}<br>${en}`;
+      return context.html(`<!doctype html><meta charset="utf-8"><title>${ru}</title><p>${body}</p>`);
+    },
+    { auth: "none" },
+  );
+
   bb.rpc.register(rpcContract, {
     overview: ({ days }) => serial(() => runner.overview(days)),
     "projects.list": async () => {
@@ -188,11 +507,12 @@ export default async function plugin(bb: BbPluginApi) {
       if (!run) throw new Error("runMissing");
       const p = (await projects()).find((x) => x.id === run.projectId);
       if (!p) throw new Error("projectMissing");
+      if (p.pipeline || !p.hostId) return { out: "", err: "" };
       return host.tail(p.hostId, { runId, stageId, lines });
     },
     "settings.get": async () => {
       await ensureSeed();
-      return settings();
+      return settingsSchema.parse(await settings());
     },
     "settings.save": async (next) => {
       await store.set("settings", next);
@@ -202,6 +522,22 @@ export default async function plugin(bb: BbPluginApi) {
       await ensureSeed();
       return { text: await morningText() };
     },
+    "accounts.list": async () => listAccounts(db).map(publicAccount),
+    "accounts.remove": async ({ accountId }) => removeAccount(db, accountId),
+    "accounts.clients": async ({ accountId }) => {
+      const direct = await directFor(accountId);
+      return direct.agencyClients();
+    },
+    "accounts.campaigns": async ({ accountId, clientLogin }) => {
+      const direct = await directFor(accountId, clientLogin);
+      return direct.campaigns();
+    },
+    "oauth.redirectUri": async () => ({ uri: oauthRedirectUri(bb) }),
+    "secrets.status": async () => secrets.status(),
+    "pipeline.run": ({ projectId, day, dryRun }) =>
+      serial(() => runner.start(projectId, "night-export", day, "manual", dryRun)),
+    "pipeline.preview": ({ projectId, day }) =>
+      serial(() => runner.start(projectId, "night-export", day, "manual", true)),
   });
 
   bb.background.schedule("tick", "* * * * *", () => serial(() => runner.tick()));
@@ -245,6 +581,11 @@ export default async function plugin(bb: BbPluginApi) {
         summary: "Print stored projects and settings as JSON",
         usage: "bb direct-queries export",
       },
+      {
+        name: "pipeline",
+        summary: "Run the built-in analysis pipeline",
+        usage: "bb direct-queries pipeline run <project> [--date YYYY-MM-DD] [--dry-run]",
+      },
     ],
     run: async (argv) => {
       try {
@@ -267,6 +608,20 @@ export default async function plugin(bb: BbPluginApi) {
             const r = await serial(() => runner.start(argv[1] ?? "", argv[2] ?? "", day, "manual"));
             return { exitCode: 0, stdout: JSON.stringify(r) };
           }
+          case "pipeline": {
+            if (argv[1] !== "run") {
+              return {
+                exitCode: 1,
+                stderr: "usage: bb direct-queries pipeline run <project> [--date D] [--dry-run]",
+              };
+            }
+            const dateI = argv.indexOf("--date");
+            const day = dateI === -1 ? undefined : argv[dateI + 1];
+            const r = await serial(() =>
+              runner.start(argv[2] ?? "", "night-export", day, "manual", argv.includes("--dry-run")),
+            );
+            return { exitCode: 0, stdout: JSON.stringify(r) };
+          }
           case "enable":
           case "disable": {
             const enabled = argv[0] === "enable";
@@ -287,6 +642,10 @@ export default async function plugin(bb: BbPluginApi) {
             const text = await morningText();
             if (argv.includes("--send")) {
               const s = await settings();
+              if (s.telegram?.enabled) {
+                await sendTelegram(text);
+                return { exitCode: 0, stdout: "sent" };
+              }
               const { exitCode } = await host.notify(s.morningLine.hostId, {
                 command: s.morningLine.command,
                 text,
@@ -326,7 +685,7 @@ export default async function plugin(bb: BbPluginApi) {
             return {
               exitCode: 0,
               stdout:
-                "bb direct-queries status [--json] | run <project> <job> [--date D] | enable|disable <project> [job] | morning [--dry-run|--send] | import <file> | export",
+                "bb direct-queries status [--json] | run <project> <job> [--date D] | pipeline run <project> [--date D] [--dry-run] | enable|disable <project> [job] | morning [--dry-run|--send] | import <file> | export",
             };
         }
       } catch (e) {

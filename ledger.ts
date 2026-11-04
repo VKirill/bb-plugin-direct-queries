@@ -1,4 +1,4 @@
-import type { Job, LedgerRow, Project } from "./model.ts";
+import { jobsOf, type Job, type LedgerRow, type Project } from "./model.ts";
 
 export type DayStatus = "green" | "amber" | "red" | "grey" | "empty" | "running";
 
@@ -41,10 +41,11 @@ export function morningLine(projects: Project[], rows: LedgerRow[], day: string)
   const lines = [`Директ, запросы за ${dd}.${mm}`];
   for (const p of projects) {
     if (!p.enabled) continue;
+    const jobs = jobsOf(p);
     const job =
-      p.jobs.find((j) => j.id === "night-export" && j.enabled) ??
-      p.jobs.find((j) => j.enabled) ??
-      p.jobs[0];
+      jobs.find((j) => j.id === "night-export" && j.enabled) ??
+      jobs.find((j) => j.enabled) ??
+      jobs[0];
     if (!job) continue;
     const own = rows.filter((r) => r.projectId === p.id && r.jobId === job.id && r.day === day);
     const status = dayStatus(own, job, day);

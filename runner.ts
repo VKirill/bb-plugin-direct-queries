@@ -1,8 +1,9 @@
-import type { Job, LedgerRow, Project, Settings, Stage } from "./model.ts";
+import { jobsOf, type Job, type LedgerRow, type Project, type Settings, type Stage } from "./model.ts";
 import { buildJobScript } from "./jobscript.ts";
 import { addDays, dueSlots, moscowParts } from "./slots.ts";
 import { dayStatus, morningLine } from "./ledger.ts";
 import { seedProjects, seedSettings } from "./seed.ts";
+import type { Trigger as PipelineTrigger } from "./pipeline.ts";
 
 export interface Store {
   get<T>(key: string): Promise<T | undefined>;
@@ -117,8 +118,20 @@ export function createRunner(args: {
   host: HostPort;
   now: () => number;
   newRunId: () => string;
+  pipeline?: {
+    run: (
+      project: Project,
+      day: string,
+      opts: { trigger: PipelineTrigger; dryRun?: boolean; runId: string; attempt: number },
+    ) => Promise<LedgerRow[]>;
+    sync: (
+      project: Project,
+      opts: { runId: string; attempt: number; dryRun?: boolean },
+    ) => Promise<LedgerRow[]>;
+  };
+  sendTelegram?: (text: string) => Promise<void>;
 }) {
-  const { store, host, now, newRunId } = args;
+  const { store, host, now, newRunId, pipeline, sendTelegram } = args;
 
   let ensured = false;
   const ensure = async (): Promise<void> => {
@@ -141,8 +154,10 @@ export function createRunner(args: {
   };
   const saveRun = (run: StoredRun): Promise<void> => store.set(runKey(run), run);
 
-  const jobOf = (projects: Project[], pid: string, jid: string): Job | undefined =>
-    projects.find((p) => p.id === pid)?.jobs.find((j) => j.id === jid);
+  const jobOf = (projects: Project[], pid: string, jid: string): Job | undefined => {
+    const p = projects.find((x) => x.id === pid);
+    return p ? jobsOf(p).find((j) => j.id === jid) : undefined;
+  };
 
   const reportDay = (job: Job, ms: number): string => {
     const m = moscowParts(ms);
@@ -156,12 +171,14 @@ export function createRunner(args: {
     jobId: string,
     day: string,
     trigger: Trigger,
+    dryRun = false,
   ): Promise<StoredRun> => {
     const project = projects.find((p) => p.id === projectId);
     const job = jobOf(projects, projectId, jobId);
     if (!project || !job) throw new Error("jobMissing");
-    if (runs.some((r) => r.projectId === projectId && r.jobId === jobId && r.alive))
-      throw new Error("jobRunning");
+    const sameJob = runs.some((r) => r.projectId === projectId && r.jobId === jobId && r.alive);
+    const sameProject = Boolean(project.pipeline) && runs.some((r) => r.projectId === projectId && r.alive);
+    if (sameJob || sameProject) throw new Error("jobRunning");
     const runId = newRunId();
     const firstStage = job.stages[0]?.id ?? job.id;
     const run: StoredRun = {
@@ -176,14 +193,44 @@ export function createRunner(args: {
       rows: [],
     };
     run.rows = [markerRow(run, firstStage)];
+    if (project.pipeline) {
+      try {
+        const opts = { trigger, dryRun, runId, attempt: run.attempt };
+        run.rows =
+          jobId === "library-sync"
+            ? await (pipeline?.sync(project, opts) ?? Promise.reject(new Error("pipeline not wired")))
+            : await (pipeline?.run(project, day, opts) ?? Promise.reject(new Error("pipeline not wired")));
+        run.alive = false;
+        run.finishedAt = iso(now());
+        run.exitCode = run.rows.some((r) => r.status === "failed" && (jobsOf(project).find((j) => j.id === jobId)?.stages.find((s) => s.id === r.stageId)?.required ?? true))
+          ? 1
+          : 0;
+      } catch (e) {
+        run.alive = false;
+        run.finishedAt = iso(now());
+        run.exitCode = 1;
+        run.rows = [
+          {
+            ...baseRow(run, job.id),
+            status: "failed",
+            finishedAt: run.finishedAt,
+            firstError: hostError(e),
+          },
+        ];
+      }
+      runs.push(run);
+      await saveRun(run);
+      return run;
+    }
+    const cwd = project.cwd ?? "";
     const script = buildJobScript(job, {
       date: day,
-      cwd: project.cwd,
-      runDir: runDirFor(project.cwd, runId),
+      cwd,
+      runDir: runDirFor(cwd, runId),
       catchUp: trigger === "catch-up",
     });
     try {
-      const { pid } = await host.start(project.hostId, { runId, cwd: project.cwd, script });
+      const { pid } = await host.start(project.hostId ?? "", { runId, cwd, script });
       run.pid = pid;
     } catch (e) {
       run.alive = false;
@@ -221,6 +268,7 @@ export function createRunner(args: {
         await saveRun(run);
         continue;
       }
+      if (project.pipeline || !project.hostId) continue;
       try {
         const st = await host.status(project.hostId, { runId: run.runId });
         const skipped = run.rows.filter((r) => r.status === "skipped");
@@ -263,7 +311,7 @@ export function createRunner(args: {
     // 2. morning line, once per Moscow day
     const m = moscowParts(at);
     if (
-      settings.morningLine.enabled &&
+      (settings.morningLine.enabled || settings.telegram?.enabled) &&
       m.hour === settings.morningLine.hour &&
       meta.lastMorningDay !== m.date
     ) {
@@ -271,10 +319,13 @@ export function createRunner(args: {
       const dayRows = runs.flatMap((r) => (r.day === day ? r.rows : []));
       const text = morningLine(projects, dayRows, day);
       try {
-        await host.notify(settings.morningLine.hostId, {
-          command: settings.morningLine.command,
-          text,
-        });
+        if (settings.morningLine.enabled) {
+          await host.notify(settings.morningLine.hostId, {
+            command: settings.morningLine.command,
+            text,
+          });
+        }
+        if (settings.telegram?.enabled && sendTelegram) await sendTelegram(text);
         meta.lastMorningDay = m.date;
       } catch {
         // notify failed: retry on the next tick of this Moscow hour
@@ -325,6 +376,7 @@ export function createRunner(args: {
       jobId: string,
       day?: string,
       trigger: Trigger = "manual",
+      dryRun = false,
     ): Promise<{ runId: string; day: string }> {
       await ensure();
       const projects = await loadProjects();
@@ -336,6 +388,7 @@ export function createRunner(args: {
         jobId,
         day ?? (job ? reportDay(job, now()) : moscowParts(now()).date),
         trigger,
+        dryRun,
       );
       return { runId: run.runId, day: run.day };
     },
@@ -369,7 +422,7 @@ export function createRunner(args: {
           title: p.title,
           site: p.site,
           enabled: p.enabled,
-          jobs: p.jobs.map((j) => {
+          jobs: jobsOf(p).map((j) => {
             const mine = runs.filter((r) => r.projectId === p.id && r.jobId === j.id);
             const latest = mine
               .slice()
