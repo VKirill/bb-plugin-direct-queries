@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server.ts";
 import type { LedgerRow, Project, Settings } from "./model.ts";
-import { useStrings } from "./i18n.ts";
+import { strings, useStrings } from "./i18n.ts";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -394,5 +394,5 @@ function SettingsTab({ t, rpc }: { t: ReturnType<typeof useStrings>; rpc: Return
 }
 
 export default definePluginApp((app) => {
-  app.slots.navPanel({ id: "direct-queries", title: "Direct queries", icon: "Search", path: "direct-queries", component: Page });
+  app.slots.navPanel({ id: "direct-queries", title: strings().title, icon: "direct-queries/brand", path: "direct-queries", component: Page });
 });
