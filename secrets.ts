@@ -16,8 +16,8 @@ export const SECRET_NAMES = [
 export type SecretName = (typeof SECRET_NAMES)[number];
 
 export const CATALOG_NAMES: Record<SecretName, string> = {
-  yandexClientId: "YANDEX_CLIENT_ID",
-  yandexClientSecret: "YANDEX_CLIENT_SECRET",
+  yandexClientId: "DIRECT_QUERIES_YANDEX_CLIENT_ID",
+  yandexClientSecret: "DIRECT_QUERIES_YANDEX_CLIENT_SECRET",
   openluxKey: "OPENLUX_API_KEY",
   typesafeKey: "TYPESAFE_API_KEY",
   xmlstockUser: "XMLSTOCK_USER",
