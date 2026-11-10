@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../server.ts";
-import { passportCompleteness, type LedgerRow, type Project } from "../model.ts";
+import {
+  passportCompleteness,
+  type LedgerRow,
+  type NegativesLevel,
+  type Project,
+} from "../model.ts";
 import type { en } from "../i18n.ts";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -59,7 +64,15 @@ function emptyPipeline(): Project {
       },
       serp: { enabled: true, budget: 25, lr: 225, device: "desktop" },
       library: { enabled: true, apply: false },
-      schedule: { hour: 3, catchUpHours: [4, 6, 9, 12], syncHours: [0, 4, 8, 12, 16, 20] },
+      negatives: { level: "library", apply: false },
+      schedule: {
+        hour: 3,
+        mode: "daily",
+        hours: [],
+        reportDay: "yesterday",
+        catchUpHours: [4, 6, 9, 12],
+        syncHours: [0, 4, 8, 12, 16, 20],
+      },
     },
   };
 }
@@ -346,37 +359,107 @@ export function PipelineForm({
           onChange={(e) => setPipe({ serp: { ...pipe.serp, lr: Number(e.target.value) } })}
         />
       </div>
-      <h3>{t.libraries}</h3>
+      <h3>{t.negatives}</h3>
       <div className="dq-field">
         <Label>{t.syncNegatives}</Label>
         <Switch checked={pipe.library.enabled} onCheckedChange={(v) => setPipe({ library: { ...pipe.library, enabled: v } })} />
       </div>
       <div className="dq-field">
+        <Label>{t.negLevel}</Label>
+        <select
+          value={pipe.negatives?.level ?? "library"}
+          onChange={(e) =>
+            setPipe({
+              negatives: {
+                level: e.target.value as NegativesLevel,
+                apply: pipe.negatives?.apply ?? pipe.library.apply,
+              },
+            })
+          }
+        >
+          <option value="library">{t.levelLibrary}</option>
+          <option value="campaign">{t.levelCampaign}</option>
+          <option value="adgroup">{t.levelAdgroup}</option>
+          <option value="keyword">{t.levelKeyword}</option>
+        </select>
+      </div>
+      <div className="dq-field">
         <Label>{t.writeDirect}</Label>
-        <Switch checked={pipe.library.apply} onCheckedChange={(v) => setPipe({ library: { ...pipe.library, apply: v } })} />
+        <Switch
+          checked={pipe.negatives?.apply ?? pipe.library.apply}
+          onCheckedChange={(v) =>
+            setPipe({
+              negatives: { level: pipe.negatives?.level ?? "library", apply: v },
+            })
+          }
+        />
       </div>
       <h3>{t.schedule}</h3>
       <div className="dq-field">
-        <Label>{t.nightHour}</Label>
-        <Input
-          type="number"
-          min={0}
-          max={23}
-          value={pipe.schedule.hour}
-          onChange={(e) => setPipe({ schedule: { ...pipe.schedule, hour: Number(e.target.value) } })}
-        />
+        <Label>{t.frequency}</Label>
+        <select
+          value={pipe.schedule.mode ?? "daily"}
+          onChange={(e) =>
+            setPipe({
+              schedule: { ...pipe.schedule, mode: e.target.value as "daily" | "twice" | "custom" },
+            })
+          }
+        >
+          <option value="daily">{t.freqDaily}</option>
+          <option value="twice">{t.freqTwice}</option>
+          <option value="custom">{t.freqCustom}</option>
+        </select>
+      </div>
+      {(pipe.schedule.mode ?? "daily") === "custom" ? (
+        <div className="dq-field">
+          <Label>{t.customHours}</Label>
+          <Input
+            value={(pipe.schedule.hours ?? []).join(", ")}
+            onChange={(e) =>
+              setPipe({ schedule: { ...pipe.schedule, hours: parseHours(e.target.value) } })
+            }
+          />
+        </div>
+      ) : (
+        <div className="dq-field">
+          <Label>{t.nightHour}</Label>
+          <Input
+            type="number"
+            min={0}
+            max={23}
+            value={pipe.schedule.hour ?? 3}
+            onChange={(e) => setPipe({ schedule: { ...pipe.schedule, hour: Number(e.target.value) } })}
+          />
+        </div>
+      )}
+      <div className="dq-field">
+        <Label>{t.reportDay}</Label>
+        <select
+          value={pipe.schedule.reportDay ?? "yesterday"}
+          onChange={(e) =>
+            setPipe({
+              schedule: {
+                ...pipe.schedule,
+                reportDay: e.target.value as "yesterday" | "today",
+              },
+            })
+          }
+        >
+          <option value="yesterday">{t.reportYesterday}</option>
+          <option value="today">{t.reportToday}</option>
+        </select>
       </div>
       <div className="dq-field">
         <Label>{t.catchUpHours}</Label>
         <Input
-          value={pipe.schedule.catchUpHours.join(", ")}
+          value={(pipe.schedule.catchUpHours ?? []).join(", ")}
           onChange={(e) => setPipe({ schedule: { ...pipe.schedule, catchUpHours: parseHours(e.target.value) } })}
         />
       </div>
       <div className="dq-field">
         <Label>{t.syncHours}</Label>
         <Input
-          value={pipe.schedule.syncHours.join(", ")}
+          value={(pipe.schedule.syncHours ?? []).join(", ")}
           onChange={(e) => setPipe({ schedule: { ...pipe.schedule, syncHours: parseHours(e.target.value) } })}
         />
       </div>

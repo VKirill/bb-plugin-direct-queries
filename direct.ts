@@ -55,6 +55,7 @@ export interface Campaign {
   State: string;
   Status: string;
   Type: string;
+  NegativeKeywords?: { Items?: string[] };
 }
 
 export interface AdGroup {
@@ -62,6 +63,7 @@ export interface AdGroup {
   CampaignId: number;
   Name: string;
   NegativeKeywordSharedSetIds?: number[];
+  NegativeKeywords?: { Items?: string[] };
 }
 
 export interface Keyword {
@@ -295,9 +297,19 @@ export function createDirectClient(opts: DirectClientOptions) {
           States: filter?.states ?? ["ON", "SUSPENDED", "OFF"],
           ...(filter?.ids?.length ? { Ids: filter.ids } : {}),
         },
-        FieldNames: ["Id", "Name", "State", "Status", "Type"],
+        FieldNames: ["Id", "Name", "State", "Status", "Type", "NegativeKeywords"],
       });
       return res.Campaigns ?? [];
+    },
+
+    async updateCampaignNegatives(items: { id: number; phrases: string[] }[]): Promise<unknown> {
+      const res = await call<{ UpdateResults: unknown[] }>("campaigns", "update", {
+        Campaigns: items.map((item) => ({
+          Id: item.id,
+          NegativeKeywords: { Items: item.phrases },
+        })),
+      });
+      return res.UpdateResults;
     },
 
     async adGroups(campaignIds: number[]): Promise<AdGroup[]> {
@@ -308,7 +320,13 @@ export function createDirectClient(opts: DirectClientOptions) {
           "adgroups",
           {
             SelectionCriteria: { CampaignIds: batch },
-            FieldNames: ["Id", "CampaignId", "Name", "NegativeKeywordSharedSetIds"],
+            FieldNames: [
+              "Id",
+              "CampaignId",
+              "Name",
+              "NegativeKeywordSharedSetIds",
+              "NegativeKeywords",
+            ],
           },
           "AdGroups",
         )) {
@@ -325,6 +343,16 @@ export function createDirectClient(opts: DirectClientOptions) {
         AdGroups: items.map((item) => ({
           Id: item.id,
           NegativeKeywordSharedSetIds: item.sharedSetIds,
+        })),
+      });
+      return res.UpdateResults;
+    },
+
+    async updateAdGroupNegatives(items: { id: number; phrases: string[] }[]): Promise<unknown> {
+      const res = await call<{ UpdateResults: unknown[] }>("adgroups", "update", {
+        AdGroups: items.map((item) => ({
+          Id: item.id,
+          NegativeKeywords: { Items: item.phrases },
         })),
       });
       return res.UpdateResults;
@@ -353,6 +381,13 @@ export function createDirectClient(opts: DirectClientOptions) {
         SelectionCriteria: { Ids: ids },
       });
       return res.DeleteResults;
+    },
+
+    async updateKeywords(items: { id: number; keyword: string }[]): Promise<unknown> {
+      const res = await call<{ UpdateResults: unknown[] }>("keywords", "update", {
+        Keywords: items.map((item) => ({ Id: item.id, Keyword: item.keyword })),
+      });
+      return res.UpdateResults;
     },
 
     async sharedSets(ids?: number[]): Promise<SharedSet[]> {

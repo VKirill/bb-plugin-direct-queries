@@ -115,6 +115,55 @@ describe("adGroups", () => {
   });
 });
 
+describe("negative updates", () => {
+  it("requests NegativeKeywords on campaigns and ad groups", async () => {
+    const { fetch, calls } = fakeFetch([ok({ Campaigns: [] }), ok({ AdGroups: [] })]);
+    const client = createDirectClient({ token: "t", fetch });
+    await client.campaigns();
+    await client.adGroups([1]);
+    const fields = calls.map((c) => {
+      const body = JSON.parse(c.init?.body ?? "{}") as { params: { FieldNames: string[] } };
+      return body.params.FieldNames;
+    });
+    expect(fields[0]).toContain("NegativeKeywords");
+    expect(fields[1]).toContain("NegativeKeywords");
+  });
+
+  it("posts campaign, ad group and keyword updates in the Direct v5 shape", async () => {
+    const { fetch, calls } = fakeFetch([
+      ok({ UpdateResults: [{ Id: 1 }] }),
+      ok({ UpdateResults: [{ Id: 2 }] }),
+      ok({ UpdateResults: [{ Id: 3 }] }),
+    ]);
+    const client = createDirectClient({ token: "t", fetch });
+    await client.updateCampaignNegatives([{ id: 1, phrases: ["бесплатно", "своими руками"] }]);
+    await client.updateAdGroupNegatives([{ id: 2, phrases: ["ещё минус"] }]);
+    await client.updateKeywords([{ id: 3, keyword: "купить фильтр -бесплатно" }]);
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://api.direct.yandex.com/json/v5/campaigns",
+      "https://api.direct.yandex.com/json/v5/adgroups",
+      "https://api.direct.yandex.com/json/v5/keywords",
+    ]);
+    const bodies = calls.map((c) => JSON.parse(c.init?.body ?? "{}"));
+    expect(bodies[0]).toEqual({
+      method: "update",
+      params: {
+        Campaigns: [{ Id: 1, NegativeKeywords: { Items: ["бесплатно", "своими руками"] } }],
+      },
+    });
+    expect(bodies[1]).toEqual({
+      method: "update",
+      params: {
+        AdGroups: [{ Id: 2, NegativeKeywords: { Items: ["ещё минус"] } }],
+      },
+    });
+    expect(bodies[2]).toEqual({
+      method: "update",
+      params: { Keywords: [{ Id: 3, Keyword: "купить фильтр -бесплатно" }] },
+    });
+  });
+});
+
 describe("searchQueryReport", () => {
   const tsv = [
     ["Date", "CampaignId", "Query", "MatchType", "Impressions", "Clicks", "Cost"].join("\t"),

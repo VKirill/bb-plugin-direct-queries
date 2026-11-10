@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { dueSlots, moscowParts, addDays } from "../slots.ts";
-import { fixtureProjects } from "./fixtures/projects.ts";
+import { fixturePipelineProject, fixtureProjects } from "./fixtures/projects.ts";
 import type { Job, Project } from "../model.ts";
 
 const projects = fixtureProjects();
@@ -88,5 +88,48 @@ describe("dueSlots", () => {
     const due = dueSlots(projects, t0603 - 60000, t0603, never);
     expect(due).toContainEqual({ projectId: alpha.id, jobId: "bids", day: "2026-11-04", trigger: "schedule" });
     expect(due.some((d) => d.projectId === beta.id)).toBe(false);
+  });
+
+  it("a twice-daily pipeline with reportDay today fires both slots for the same day", () => {
+    const base = fixturePipelineProject();
+    const pipelineProjects: Project[] = [
+      {
+        ...base,
+        pipeline: {
+          ...base.pipeline!,
+          schedule: {
+            hour: 3,
+            mode: "twice",
+            reportDay: "today",
+            catchUpHours: [],
+            syncHours: [],
+          },
+        },
+      },
+    ];
+    const first = dueSlots(
+      pipelineProjects,
+      Date.parse("2026-11-03T23:59:00Z"),
+      Date.parse("2026-11-04T00:00:00Z"),
+      never,
+    );
+    expect(first).toContainEqual({
+      projectId: "gamma",
+      jobId: "night-export",
+      day: "2026-11-04",
+      trigger: "schedule",
+    });
+    const second = dueSlots(
+      pipelineProjects,
+      Date.parse("2026-11-04T11:59:00Z"),
+      Date.parse("2026-11-04T12:00:00Z"),
+      never,
+    );
+    expect(second).toContainEqual({
+      projectId: "gamma",
+      jobId: "night-export",
+      day: "2026-11-04",
+      trigger: "schedule",
+    });
   });
 });

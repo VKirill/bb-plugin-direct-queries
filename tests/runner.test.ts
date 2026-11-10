@@ -269,6 +269,47 @@ describe("built-in pipeline schedule", () => {
     expect(host.started).toHaveLength(0);
     expect(started).toEqual(["gamma:2026-11-03"]);
   });
+
+  it("reportDay today and twice-daily hours each start a run for the same Moscow day", async () => {
+    const store = new MemStore();
+    const host = new FakeHost();
+    const started: string[] = [];
+    seq = 0;
+    const runner = createRunner({
+      store,
+      host,
+      now: () => currentNow,
+      newRunId: () => `run-${++seq}`,
+      pipeline: {
+        run: async (project, day) => {
+          started.push(`${project.id}:${day}`);
+          return [] as LedgerRow[];
+        },
+        sync: async () => [],
+      },
+    });
+    const base = fixturePipelineProject();
+    const project: Project = {
+      ...base,
+      pipeline: {
+        ...base.pipeline!,
+        schedule: {
+          hour: 3,
+          mode: "twice",
+          reportDay: "today",
+          catchUpHours: [],
+          syncHours: [],
+        },
+      },
+    };
+    await store.set("projects", [project]);
+    await store.set("settings", fixtureSettings());
+    at(T0300); // 03:00 MSK, first slot
+    await runner.tick();
+    at("2026-11-04T12:00:00Z"); // 15:00 MSK, second slot
+    await runner.tick();
+    expect(started).toEqual(["gamma:2026-11-04", "gamma:2026-11-04"]);
+  });
 });
 
 describe("seeding", () => {
