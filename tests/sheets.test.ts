@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
+import type { EvaluatedPlacement } from "../placements.ts";
 import { REVIEW_COLUMNS, type ReviewRow } from "../review.ts";
-import { createSheetsClient } from "../sheets.ts";
+import { createSheetsClient, PLACEMENT_COLUMNS } from "../sheets.ts";
 
 const jsonRes = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
@@ -175,6 +176,76 @@ describe("publishDay", () => {
     expect(data?.[queryIndex]).toBe("sample query");
     expect(data?.[decisionIndex]).toBe("В минус");
     expect(data?.[commentIndex]).toBe("leave this");
+  });
+});
+
+describe("publishPlacements", () => {
+  const placement = (over: Partial<EvaluatedPlacement> = {}): EvaluatedPlacement => ({
+    campaignId: 11,
+    campaign: "RSYA",
+    placement: "com.example.game",
+    impressions: 1000,
+    clicks: 50,
+    ctr: 5,
+    cost: 400,
+    conversions: 0,
+    verdict: "exclude",
+    rule: "regex /game/",
+    ...over,
+  });
+
+  it("writes the Площадки header and keeps the client's «Решение»", async () => {
+    const existing = [
+      [...PLACEMENT_COLUMNS],
+      PLACEMENT_COLUMNS.map((column) => {
+        if (column === "Кампания") return "RSYA";
+        if (column === "Площадка") return "com.example.game";
+        if (column === "Решение") return "Оставить";
+        return "";
+      }),
+    ];
+    let putBody: { values?: unknown[][] } | undefined;
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.includes("oauth2.googleapis.com/token")) {
+        return jsonRes({ access_token: "tok", expires_in: 3600 });
+      }
+      if (method === "GET" && url.includes("fields=spreadsheetId")) {
+        return jsonRes({
+          spreadsheetId: "sheet_test",
+          sheets: [{ properties: { sheetId: 9, title: "Площадки", index: 1 } }],
+        });
+      }
+      if (method === "GET" && url.includes("/values/")) {
+        return jsonRes({ values: existing });
+      }
+      if (method === "PUT" && url.includes("/values/")) {
+        putBody = JSON.parse(String(init?.body ?? "{}")) as { values?: unknown[][] };
+        return jsonRes({});
+      }
+      return jsonRes({});
+    };
+    const client = createSheetsClient({
+      ...creds,
+      fetch: fetchFn,
+      sleep: async () => undefined,
+    });
+    const result = await client.publishPlacements("sheet_test", [
+      placement(),
+      placement({ placement: "other.site", verdict: "watch", rule: "" }),
+    ]);
+    expect(result.written).toBe(2);
+    expect(putBody?.values?.[0]).toEqual([...PLACEMENT_COLUMNS]);
+    const decisionIndex = PLACEMENT_COLUMNS.indexOf("Решение");
+    const placementIndex = PLACEMENT_COLUMNS.indexOf("Площадка");
+    const gameRow = putBody?.values?.find((row) => row[placementIndex] === "com.example.game");
+    expect(gameRow?.[decisionIndex]).toBe("Оставить");
+    expect(result.decisions).toContainEqual({
+      campaignId: 11,
+      placement: "com.example.game",
+      decision: "keep",
+    });
   });
 });
 

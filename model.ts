@@ -77,6 +77,9 @@ export function passportCompleteness(profile: SiteProfile): {
 export const negativesLevelSchema = z.enum(["library", "campaign", "adgroup", "keyword"]);
 export type NegativesLevel = z.infer<typeof negativesLevelSchema>;
 
+export const placementTemplateIdSchema = z.enum(["safe", "apps-and-games", "strict"]);
+export type PlacementTemplateId = z.infer<typeof placementTemplateIdSchema>;
+
 export const pipelineSchema = z
   .object({
     accountId: z.string(),
@@ -111,6 +114,14 @@ export const pipelineSchema = z
       .object({
         level: negativesLevelSchema.default("library"),
         apply: z.boolean().optional(),
+      })
+      .optional(),
+    placements: z
+      .object({
+        enabled: z.boolean(),
+        template: placementTemplateIdSchema.default("safe"),
+        apply: z.boolean().default(false),
+        days: z.number().int().min(1).max(31).default(7),
       })
       .optional(),
   })
@@ -150,6 +161,7 @@ export const PIPELINE_NIGHT_STAGES: Stage[] = [
   stage("review", "Выгрузка клиенту", true),
   stage("upload", "Загрузка в таблицу", true),
   stage("library", "Синхронизация минусов", false),
+  stage("placements", "Площадки РСЯ", false),
 ];
 
 export function scheduleHours(schedule: ProjectPipeline["schedule"]): number[] {

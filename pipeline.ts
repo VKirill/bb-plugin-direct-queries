@@ -8,12 +8,24 @@ import { phrase, phraseKey, type ApprovedPhrase } from "./library.ts";
 import type { Feedback, JudgeItem, JudgeResult, SiteProfile } from "./judge.ts";
 import { negativesConfig, type LedgerRow, type Project, type ProjectPipeline } from "./model.ts";
 import { negativeCandidates, suggestPhrases, type AuditRow } from "./negatives.ts";
+import {
+  evaluatePlacements,
+  planExclusions,
+  resolveTemplate,
+  type EvaluatedPlacement,
+  type ExclusionCandidate,
+} from "./placements.ts";
 import { buildReviewRows, type ReviewRow } from "./review.ts";
 import type { SerpAuditRow, SerpReview } from "./serp.ts";
-import { moscowParts } from "./slots.ts";
+import { addDays, moscowParts } from "./slots.ts";
 import type { SecretName } from "./secrets.ts";
 import type { AccountRow, FeedbackRow, JudgementRow, QueryRow } from "./db.ts";
-import type { ClientDecision, PublishDayResult } from "./sheets.ts";
+import type {
+  ClientDecision,
+  PlacementSheetDecision,
+  PublishDayResult,
+  PublishPlacementsResult,
+} from "./sheets.ts";
 import type { SearchQueryRow } from "./direct.ts";
 import type { PhraseSuggestion } from "./negatives.ts";
 
@@ -74,6 +86,27 @@ export type PipelineDeps = {
     clientLogin?: string;
   }) => Promise<NegativesResult>;
   refreshLibraryColumn?: (sheetId: string, inLibrary: (query: string) => boolean) => Promise<void>;
+  placementsReport?: (args: {
+    account: AccountRow;
+    clientLogin?: string;
+    dateFrom: string;
+    dateTo: string;
+    campaignIds?: number[];
+  }) => Promise<SearchQueryRow[]>;
+  publishPlacements?: (args: {
+    sheetId: string;
+    rows: EvaluatedPlacement[];
+  }) => Promise<PublishPlacementsResult>;
+  campaignExcludedSites?: (args: {
+    account: AccountRow;
+    clientLogin?: string;
+    campaignIds: number[];
+  }) => Promise<Map<number, string[]>>;
+  updateExcludedSites?: (args: {
+    account: AccountRow;
+    clientLogin?: string;
+    items: { campaignId: number; sites: string[] }[];
+  }) => Promise<unknown>;
   listDirectInventory?: (args: {
     account: AccountRow;
     clientLogin?: string;
@@ -472,6 +505,100 @@ export async function runPipeline(
       return {
         rowsOut: result.added + result.created,
         firstError: dryRun || !apply ? "plan only" : undefined,
+      };
+    });
+  }
+
+  const placementsCfg = pipe.placements;
+  if (!placementsCfg?.enabled) {
+    rows.push(
+      stageRow(ctx, "placements", iso(deps.now()), iso(deps.now()), "skipped"),
+    );
+  } else {
+    await runStage("placements", false, async () => {
+      if (!deps.placementsReport || !deps.publishPlacements) {
+        return { status: "skipped" as const, firstError: "placements not wired" };
+      }
+      const days = placementsCfg.days && placementsCfg.days > 0 ? placementsCfg.days : 7;
+      const campaignIds = await campaignIdsFor(deps, pipe, directAccount!);
+      const raw = await deps.placementsReport({
+        account: directAccount!,
+        clientLogin: pipe.clientLogin,
+        dateFrom: addDays(day, 1 - days),
+        dateTo: day,
+        campaignIds,
+      });
+      if (raw.length === 0) {
+        return { status: "skipped" as const, firstError: "no network placements" };
+      }
+      const evaluated = evaluatePlacements(
+        raw,
+        resolveTemplate(placementsCfg.template, pipe.profile),
+      );
+      const sheetId = pipe.sheetId ?? project.sheetId;
+      let written = 0;
+      let decisions: PlacementSheetDecision[] = [];
+      if (sheetId && !dryRun) {
+        const published = await deps.publishPlacements({ sheetId, rows: evaluated });
+        written = published.written;
+        decisions = published.decisions;
+      }
+      const decisionByKey = new Map(
+        decisions.map((d) => [
+          `${d.campaignId}\t${d.placement.trim().toLowerCase()}`,
+          d.decision,
+        ]),
+      );
+      const candidates = new Map<number, ExclusionCandidate[]>();
+      for (const row of evaluated) {
+        const decision = decisionByKey.get(
+          `${row.campaignId}\t${row.placement.trim().toLowerCase()}`,
+        );
+        const keep = row.verdict === "keep" || decision === "keep";
+        if (row.verdict !== "exclude" && decision !== "exclude") continue;
+        const list = candidates.get(row.campaignId) ?? [];
+        list.push({ site: row.placement, keep });
+        candidates.set(row.campaignId, list);
+      }
+      const apply = placementsCfg.apply === true && !dryRun;
+      const notes: string[] = [];
+      if (dryRun) notes.push("dry-run");
+      else if (!placementsCfg.apply) notes.push("plan only");
+      let added = 0;
+      let overflow = 0;
+      if (candidates.size > 0 && deps.campaignExcludedSites) {
+        const current = await deps.campaignExcludedSites({
+          account: directAccount!,
+          clientLogin: pipe.clientLogin,
+          campaignIds: [...candidates.keys()],
+        });
+        const updates: { campaignId: number; sites: string[] }[] = [];
+        for (const [campaignId, list] of candidates) {
+          const plan = planExclusions(current.get(campaignId) ?? [], list);
+          added += plan.added;
+          overflow += plan.overflow;
+          if (plan.added > 0) updates.push({ campaignId, sites: plan.items });
+        }
+        if (apply && updates.length > 0) {
+          if (deps.updateExcludedSites) {
+            await deps.updateExcludedSites({
+              account: directAccount!,
+              clientLogin: pipe.clientLogin,
+              items: updates,
+            });
+          } else {
+            notes.push("updateExcludedSites not wired");
+          }
+        }
+      } else if (candidates.size > 0) {
+        notes.push("campaignExcludedSites not wired");
+      }
+      if (!apply && added > 0) notes.push(`${added} to exclude`);
+      if (overflow > 0) notes.push(`${overflow} over limit`);
+      return {
+        rowsIn: raw.length,
+        rowsOut: written || evaluated.length,
+        firstError: notes.join("; ") || undefined,
       };
     });
   }

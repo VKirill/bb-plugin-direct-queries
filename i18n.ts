@@ -132,6 +132,14 @@ export const en = {
   catchUpHours: "Catch-up hours",
   syncHours: "Sync hours",
   dryRunYesterday: "Dry run for yesterday",
+  placementsTitle: "RSYA placements",
+  analyzePlacements: "Analyze placements",
+  placementTemplate: "Template",
+  templateSafe: "Safe",
+  templateAppsGames: "Apps & games",
+  templateStrict: "Strict",
+  reportWindowDays: "Report window, days",
+  excludeInDirect: "Exclude in Direct",
 };
 
 export const ru: typeof en = {
@@ -266,6 +274,14 @@ export const ru: typeof en = {
   catchUpHours: "Часы догона",
   syncHours: "Часы синхронизации",
   dryRunYesterday: "Прогон за вчера без записи",
+  placementsTitle: "Площадки РСЯ",
+  analyzePlacements: "Анализировать площадки",
+  placementTemplate: "Шаблон",
+  templateSafe: "Безопасный",
+  templateAppsGames: "Приложения и игры",
+  templateStrict: "Строгий",
+  reportWindowDays: "Окно отчёта, дней",
+  excludeInDirect: "Исключать в Директе",
 };
 
 export type Locale = "en" | "ru";
