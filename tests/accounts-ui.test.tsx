@@ -94,6 +94,26 @@ describe("accounts screen", () => {
     await waitFor(() => expect(screen.getByText(/client-a/)).toBeTruthy());
     expect(calls).toContainEqual({ method: "accounts.clients", input: { accountId: "ag1" } });
   });
+
+  it("Load from OhMySEO lists accounts and imports the selected label", async () => {
+    routes["ohmyseoAccounts"] = async () => [
+      { label: "label-1", yandexLogin: "login1", isDefault: true, denied: false, imported: false },
+      { label: "label-2", yandexLogin: "login2", isDefault: false, denied: true, imported: false },
+    ];
+    routes["ohmyseoImport"] = async () => ({ imported: ["label-1"] });
+    await openTab("Accounts");
+    fireEvent.click(await screen.findByRole("button", { name: "Load from OhMySEO" }));
+    expect(await screen.findByText(/label-1/)).toBeTruthy();
+    expect(screen.getByText(/access closed/)).toBeTruthy();
+    const boxes = screen.getAllByRole("checkbox");
+    expect(boxes).toHaveLength(2);
+    expect((boxes[1] as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(boxes[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() =>
+      expect(calls).toContainEqual({ method: "ohmyseoImport", input: { labels: ["label-1"] } }),
+    );
+  });
 });
 
 describe("settings keys", () => {

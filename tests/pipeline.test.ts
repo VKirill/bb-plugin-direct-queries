@@ -43,6 +43,7 @@ const account = (): AccountRow => ({
   refreshToken: "refresh",
   expiresAt: T0300 + 86_400_000,
   createdAt: 1,
+  source: "yandex",
 });
 
 function fakes(over: Partial<PipelineDeps> & { calls?: { publish: number; judge: number; libraryApply: boolean[] } } = {}) {

@@ -31,11 +31,20 @@ import {
   replaceQueries,
   upsertAccount,
   upsertJudgements,
+  type AccountRow,
 } from "./db.ts";
 import { createSecrets, type SecretName } from "./secrets.ts";
 import { runLibrarySync, runPipeline, type PipelineDeps } from "./pipeline.ts";
-import { authorizeUrl, exchangeCode, refreshToken, userInfo, ensureFresh } from "./yandex-oauth.ts";
+import {
+  authorizeUrl,
+  exchangeCode,
+  refreshToken,
+  userInfo,
+  ensureFresh,
+  type FetchFn,
+} from "./yandex-oauth.ts";
 import { createDirectClient } from "./direct.ts";
+import { createOhmyClient, ohmyDirectTransport } from "./ohmyseo.ts";
 import { createSheetsClient } from "./sheets.ts";
 import { createJudge } from "./judge.ts";
 import { createSerp } from "./serp.ts";
@@ -77,6 +86,15 @@ const accountPublicSchema = z.object({
   displayName: z.string().optional(),
   isAgency: z.boolean(),
   expiresAt: z.number(),
+  source: z.enum(["yandex", "ohmyseo"]),
+});
+
+const ohmyseoAccountSchema = z.object({
+  label: z.string(),
+  yandexLogin: z.string(),
+  isDefault: z.boolean(),
+  denied: z.boolean(),
+  imported: z.boolean(),
 });
 
 export const rpcContract = defineRpcContract({
@@ -131,6 +149,11 @@ export const rpcContract = defineRpcContract({
     input: z.object({ accountId: z.string(), clientLogin: z.string().optional() }),
     output: z.unknown(),
   },
+  ohmyseoAccounts: { input: z.null(), output: z.array(ohmyseoAccountSchema) },
+  ohmyseoImport: {
+    input: z.object({ labels: z.array(z.string()) }),
+    output: z.object({ imported: z.array(z.string()) }),
+  },
   "oauth.redirectUri": { input: z.null(), output: z.object({ uri: z.string() }) },
   "secrets.status": {
     input: z.null(),
@@ -155,18 +178,37 @@ const oauthRedirectUri = (bb: BbPluginApi): string => {
   return `${origin}/api/v1/plugins/${bb.pluginId}/http/oauth/callback`;
 };
 
+const directClientFactory =
+  (secrets: ReturnType<typeof createSecrets>, fetchFn: FetchFn) =>
+  async (account: AccountRow, clientLogin?: string) => {
+    if (account.source === "ohmyseo") {
+      const auth = await secrets.get("ohmyseoAuth");
+      const client = createOhmyClient({ auth, fetch: fetchFn });
+      return createDirectClient({
+        transport: ohmyDirectTransport({
+          client,
+          account: account.ohmyLabel ?? account.login,
+          clientLogin,
+        }),
+      });
+    }
+    return createDirectClient({ token: account.accessToken, clientLogin, fetch: fetchFn });
+  };
+
 function liveDeps(
   db: ReturnType<BbPluginApi["storage"]["database"]>,
   secrets: ReturnType<typeof createSecrets>,
 ): PipelineDeps {
   const fetchFn = fetch;
   const now = () => Date.now();
+  const directClientFor = directClientFactory(secrets, fetchFn);
   return {
     now,
     getSecret: (name: SecretName) => secrets.get(name),
     getAccount: (id) => getAccount(db, id),
     saveAccount: (account) => upsertAccount(db, account),
     ensureFresh: async (account) => {
+      if (account.source === "ohmyseo") return account;
       const clientId = await secrets.get("yandexClientId");
       const clientSecret = await secrets.get("yandexClientSecret");
       const tokens = await ensureFresh(
@@ -191,12 +233,12 @@ function liveDeps(
         expiresAt: tokens.expiresAt,
       };
     },
-    searchQueryReport: async ({ token, clientLogin, date, campaignIds }) => {
-      const client = createDirectClient({ token, clientLogin, fetch: fetchFn });
+    searchQueryReport: async ({ account, clientLogin, date, campaignIds }) => {
+      const client = await directClientFor(account, clientLogin);
       return client.searchQueryReport({ dateFrom: date, dateTo: date, campaignIds });
     },
-    listCampaigns: async ({ token, clientLogin }) => {
-      const client = createDirectClient({ token, clientLogin, fetch: fetchFn });
+    listCampaigns: async ({ account, clientLogin }) => {
+      const client = await directClientFor(account, clientLogin);
       return client.campaigns();
     },
     loadQueries: (projectId, day) => listQueries(db, projectId, day),
@@ -278,8 +320,8 @@ function liveDeps(
       });
       return sheets.publishDay(sheetId, date, rows);
     },
-    syncLibrary: async ({ apply, approved, token, clientLogin }) => {
-      const client = createDirectClient({ token, clientLogin, fetch: fetchFn });
+    syncLibrary: async ({ apply, approved, account, clientLogin }) => {
+      const client = await directClientFor(account, clientLogin);
       const campaigns = await client.campaigns();
       const ids = campaigns.map((c) => c.Id);
       const groups = ids.length ? await client.adGroups(ids) : [];
@@ -297,8 +339,8 @@ function liveDeps(
       });
       await sheets.refreshLibraryColumn(sheetId, inLibrary);
     },
-    listDirectInventory: async ({ token, clientLogin }) => {
-      const client = createDirectClient({ token, clientLogin, fetch: fetchFn });
+    listDirectInventory: async ({ account, clientLogin }) => {
+      const client = await directClientFor(account, clientLogin);
       const campaigns = await client.campaigns();
       const ids = campaigns.map((c) => c.Id);
       return {
@@ -399,12 +441,16 @@ export default async function plugin(bb: BbPluginApi) {
     return morningLine(list, rows, yesterday);
   };
 
+  const directClientFor = directClientFactory(secrets, fetch);
+  const ohmyClient = async () =>
+    createOhmyClient({ auth: await secrets.get("ohmyseoAuth"), fetch });
+
   const directFor = async (accountId: string, clientLogin?: string) => {
     const account = getAccount(db, accountId);
     if (!account) throw new Error("accountMissing");
     const fresh = await deps.ensureFresh(account);
     upsertAccount(db, fresh);
-    return createDirectClient({ token: fresh.accessToken, clientLogin, fetch });
+    return directClientFor(fresh, clientLogin);
   };
 
   bb.http.route(
@@ -458,6 +504,7 @@ export default async function plugin(bb: BbPluginApi) {
         refreshToken: tokens.refreshToken,
         expiresAt: tokens.expiresAt,
         createdAt: existing?.createdAt ?? Date.now(),
+        source: "yandex",
       });
       bb.realtime.publish("changed", { accounts: true });
       const ru = `Аккаунт ${info.login} подключён, можно закрыть вкладку`;
@@ -469,7 +516,48 @@ export default async function plugin(bb: BbPluginApi) {
     { auth: "none" },
   );
 
-  bb.rpc.register(rpcContract, {
+  const { ohmyseoAccounts, ohmyseoImport, ...mainRpcContract } = rpcContract;
+
+  bb.rpc.register({ ohmyseoAccounts, ohmyseoImport }, {
+    ohmyseoAccounts: async () => {
+      const client = await ohmyClient();
+      const accounts = await client.listAccounts();
+      const imported = new Set(
+        listAccounts(db)
+          .filter((a) => a.source === "ohmyseo")
+          .map((a) => a.ohmyLabel),
+      );
+      return accounts.map((a) => ({ ...a, imported: imported.has(a.label) }));
+    },
+    ohmyseoImport: async ({ labels }) => {
+      const client = await ohmyClient();
+      const accounts = await client.listAccounts();
+      const wanted = new Set(labels);
+      const byId = new Map(listAccounts(db).map((a) => [a.id, a]));
+      const imported: string[] = [];
+      for (const a of accounts) {
+        if (!wanted.has(a.label)) continue;
+        const id = `ohmy:${a.label}`;
+        upsertAccount(db, {
+          id,
+          login: a.yandexLogin,
+          displayName: a.yandexLogin,
+          isAgency: false,
+          accessToken: "",
+          refreshToken: "",
+          expiresAt: 0,
+          createdAt: byId.get(id)?.createdAt ?? Date.now(),
+          source: "ohmyseo",
+          ohmyLabel: a.label,
+        });
+        imported.push(a.label);
+      }
+      bb.realtime.publish("changed", { accounts: true });
+      return { imported };
+    },
+  });
+
+  bb.rpc.register(mainRpcContract, {
     overview: ({ days }) => serial(() => runner.overview(days)),
     "projects.list": async () => {
       await ensureSeed();

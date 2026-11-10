@@ -8,6 +8,7 @@ function fakeBb() {
   const db = new Database(":memory:");
   const registrations = {
     rpc: null as Record<string, (input: unknown) => unknown> | null,
+    rpcCalls: [] as Array<Record<string, (input: unknown) => unknown>>,
     cli: null as { name: string; commands: Array<{ name: string }> } | null,
     schedules: [] as Array<{ name: string; cron: string }>,
     disposals: [] as Array<() => unknown>,
@@ -55,6 +56,7 @@ function fakeBb() {
     rpc: {
       register: (_contract: unknown, handlers: Record<string, (input: unknown) => unknown>) => {
         registrations.rpc = handlers;
+        registrations.rpcCalls.push(handlers);
       },
     },
     cli: {
@@ -117,6 +119,17 @@ describe("server entry", () => {
         { method: "GET", path: "/oauth/callback", auth: "none" },
       ]),
     );
+  });
+
+  it("registers the OhMySEO account RPCs", async () => {
+    const { bb, registrations } = fakeBb();
+    await plugin(bb as unknown as BbPluginApi);
+    const ohmyseo = registrations.rpcCalls.find((h) => "ohmyseoAccounts" in h);
+    expect(ohmyseo?.["ohmyseoAccounts"]).toBeTypeOf("function");
+    expect(ohmyseo?.["ohmyseoImport"]).toBeTypeOf("function");
+    await expect(
+      ohmyseo!["ohmyseoAccounts"](null) as Promise<unknown>,
+    ).rejects.toThrow("OHMY_SEO_MCP_AUTH");
   });
 
   it("projects.list stores no projects on first call", async () => {

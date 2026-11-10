@@ -38,12 +38,12 @@ export type PipelineDeps = {
   saveAccount?: (account: AccountRow) => void;
   ensureFresh: (account: AccountRow) => Promise<AccountRow>;
   searchQueryReport: (args: {
-    token: string;
+    account: AccountRow;
     clientLogin?: string;
     date: string;
     campaignIds?: number[];
   }) => Promise<SearchQueryRow[]>;
-  listCampaigns?: (args: { token: string; clientLogin?: string }) => Promise<Campaign[]>;
+  listCampaigns?: (args: { account: AccountRow; clientLogin?: string }) => Promise<Campaign[]>;
   loadQueries: (projectId: string, day: string) => QueryRow[];
   saveQueries: (projectId: string, day: string, rows: QueryRow[]) => void;
   loadJudgements: (projectId: string) => JudgementRow[];
@@ -58,12 +58,12 @@ export type PipelineDeps = {
   syncLibrary: (args: {
     apply: boolean;
     approved: ApprovedPhrase[];
-    token: string;
+    account: AccountRow;
     clientLogin?: string;
   }) => Promise<{ added: number; created: number }>;
   refreshLibraryColumn?: (sheetId: string, inLibrary: (query: string) => boolean) => Promise<void>;
   listDirectInventory?: (args: {
-    token: string;
+    account: AccountRow;
     clientLogin?: string;
   }) => Promise<{
     campaigns: Campaign[];
@@ -125,13 +125,13 @@ function toQueryRows(projectId: string, day: string, rows: SearchQueryRow[]): Qu
 async function campaignIdsFor(
   deps: PipelineDeps,
   pipe: ProjectPipeline,
-  token: string,
+  account: AccountRow,
 ): Promise<number[] | undefined> {
   const filter = pipe.campaignFilter;
   if (!filter) return undefined;
   let ids = filter.ids?.slice();
   if (filter.nameContains && deps.listCampaigns) {
-    const all = await deps.listCampaigns({ token, clientLogin: pipe.clientLogin });
+    const all = await deps.listCampaigns({ account, clientLogin: pipe.clientLogin });
     const needle = filter.nameContains.toLowerCase();
     const named = all.filter((c) => c.Name.toLowerCase().includes(needle)).map((c) => c.Id);
     ids = ids ? ids.filter((id) => named.includes(id)) : named;
@@ -157,7 +157,7 @@ export async function runPipeline(
   };
   const dryRun = opts.dryRun === true;
   const rows: LedgerRow[] = [];
-  let token = "";
+  let directAccount: AccountRow | undefined;
   let queries: QueryRow[] = [];
   let judgements: JudgeResult[] = [];
   let serpRows: SerpReview[] = [];
@@ -188,7 +188,7 @@ export async function runPipeline(
     if (!account) throw new Error(`account ${pipe.accountId} missing`);
     const fresh = await deps.ensureFresh(account);
     deps.saveAccount?.(fresh);
-    token = fresh.accessToken;
+    directAccount = fresh;
   });
   if (tokenResult === "failed") return rows;
 
@@ -198,9 +198,9 @@ export async function runPipeline(
       queries = stored;
       return { status: "reused" as const, rowsIn: 0, rowsOut: stored.length };
     }
-    const ids = await campaignIdsFor(deps, pipe, token);
+    const ids = await campaignIdsFor(deps, pipe, directAccount!);
     const raw = await deps.searchQueryReport({
-      token,
+      account: directAccount!,
       clientLogin: pipe.clientLogin,
       date: day,
       campaignIds: ids,
@@ -400,7 +400,7 @@ export async function runPipeline(
       const result = await deps.syncLibrary({
         apply,
         approved,
-        token,
+        account: directAccount!,
         clientLogin: pipe.clientLogin,
       });
       return {
@@ -450,7 +450,7 @@ export async function runLibrarySync(
     const result = await deps.syncLibrary({
       apply: pipe.library.apply && !opts.dryRun,
       approved,
-      token: fresh.accessToken,
+      account: fresh,
       clientLogin: pipe.clientLogin,
     });
     return [
