@@ -11,7 +11,11 @@
     "name": "Direct Queries",
     "description": "Registry, nightly pipeline, run ledger and dashboard for Yandex Direct search-query analysis and negatives.",
     "branding": {
-      "icon": "./assets/icon.svg"
+      "icon": "./assets/icon.svg",
+      "logo": {
+        "light": "./assets/logo.svg",
+        "dark": "./assets/logo-dark.svg"
+      }
     },
     "server": "./server.ts",
     "host": "./host.ts",
