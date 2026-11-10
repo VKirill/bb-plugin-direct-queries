@@ -1,3 +1,4 @@
+import type { EvaluatedPlacement } from "./placements.ts";
 import { REVIEW_COLUMNS, type ReviewRow } from "./review.ts";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -32,6 +33,39 @@ export type ClientDecision = {
 export type PublishDayResult = {
   tabId?: number;
   written: number;
+};
+
+export const PLACEMENT_TAB = "Площадки";
+export const PLACEMENT_COLUMNS = [
+  "Кампания",
+  "Площадка",
+  "Показы",
+  "Клики",
+  "CTR",
+  "Расход",
+  "Конверсии",
+  "Вердикт",
+  "Правило",
+  "Решение",
+] as const;
+
+const PLACEMENT_VERDICTS: Record<string, string> = {
+  exclude: "Исключить",
+  keep: "Оставить",
+  watch: "Наблюдать",
+};
+const PLACEMENT_DECISION_EXCLUDE = "Исключить";
+const PLACEMENT_DECISION_KEEP = "Оставить";
+
+export type PlacementSheetDecision = {
+  campaignId: number;
+  placement: string;
+  decision: "exclude" | "keep" | "";
+};
+
+export type PublishPlacementsResult = {
+  written: number;
+  decisions: PlacementSheetDecision[];
 };
 
 type SheetProps = { sheetId: number; title: string; index?: number };
@@ -486,5 +520,125 @@ export const createSheetsClient = (input: CreateSheetsClientInput) => {
     }
   };
 
-  return { publishDay, pullDecisions, shareByLink, refreshLibraryColumn };
+  const placementKey = (campaign: string, placement: string): string =>
+    `${campaign}\t${placement.trim().toLowerCase()}`;
+
+  const publishPlacements = async (
+    sheetId: string,
+    rows: EvaluatedPlacement[],
+  ): Promise<PublishPlacementsResult> => {
+    if (rows.length === 0) return { written: 0, decisions: [] };
+    const { tabs } = await metadata(sheetId);
+    const existing = new Map<string, string>();
+    let tabId = tabs.get(PLACEMENT_TAB)?.sheetId;
+    const tabExisted = tabId !== undefined;
+    if (tabId === undefined) {
+      const reply = asRecord(
+        await api("POST", `/${sheetId}:batchUpdate`, {
+          requests: [
+            {
+              addSheet: {
+                properties: {
+                  title: PLACEMENT_TAB,
+                  gridProperties: { frozenRowCount: 1 },
+                },
+              },
+            },
+          ],
+        }),
+      );
+      const replies = Array.isArray(reply.replies) ? reply.replies : [];
+      const added = asRecord(asRecord(asRecord(replies[0]).addSheet).properties);
+      tabId = Number(added.sheetId);
+    } else {
+      const body = asRecord(
+        await api("GET", `/${sheetId}/values/${encodeRange(`'${PLACEMENT_TAB}'!A1:Z`)}`),
+      );
+      const values = Array.isArray(body.values) ? (body.values as unknown[][]) : [];
+      if (values.length > 1) {
+        const headers = values[0].map((cell) => String(cell));
+        const campaignIndex = headers.indexOf("Кампания");
+        const placementIndex = headers.indexOf("Площадка");
+        const decisionIndex = headers.indexOf("Решение");
+        if (campaignIndex >= 0 && placementIndex >= 0 && decisionIndex >= 0) {
+          for (const raw of values.slice(1)) {
+            const decision = String(raw[decisionIndex] ?? "").trim();
+            if (!decision) continue;
+            existing.set(
+              placementKey(String(raw[campaignIndex] ?? ""), String(raw[placementIndex] ?? "")),
+              decision,
+            );
+          }
+        }
+      }
+    }
+    const sorted = [...rows].sort(
+      (a, b) =>
+        Number(b.verdict === "exclude") - Number(a.verdict === "exclude") || b.cost - a.cost,
+    );
+    const values = sorted.map((row) => {
+      const key = placementKey(row.campaign, row.placement);
+      return [
+        row.campaign,
+        row.placement,
+        Math.round(row.impressions),
+        Math.round(row.clicks),
+        Math.round(row.ctr * 100) / 100,
+        Math.round(row.cost * 100) / 100,
+        row.conversions,
+        PLACEMENT_VERDICTS[row.verdict] ?? row.verdict,
+        row.rule,
+        existing.get(key) ?? "",
+      ];
+    });
+    if (tabExisted) {
+      await api("POST", `/${sheetId}/values/${encodeRange(`'${PLACEMENT_TAB}'!A2:Z`)}:clear`, {});
+    }
+    await api("PUT", `/${sheetId}/values/${encodeRange(`'${PLACEMENT_TAB}'!A1`)}?valueInputOption=RAW`, {
+      values: [PLACEMENT_COLUMNS.slice(), ...values],
+    });
+    await api("POST", `/${sheetId}:batchUpdate`, {
+      requests: [
+        {
+          setDataValidation: {
+            range: {
+              sheetId: tabId,
+              startRowIndex: 1,
+              startColumnIndex: PLACEMENT_COLUMNS.length - 1,
+              endColumnIndex: PLACEMENT_COLUMNS.length,
+            },
+            rule: {
+              condition: {
+                type: "ONE_OF_LIST",
+                values: [
+                  { userEnteredValue: PLACEMENT_DECISION_EXCLUDE },
+                  { userEnteredValue: PLACEMENT_DECISION_KEEP },
+                ],
+              },
+              strict: true,
+              showCustomUi: true,
+            },
+          },
+        },
+      ],
+    });
+    return {
+      written: values.length,
+      decisions: sorted.map((row) => {
+        const decision = (existing.get(placementKey(row.campaign, row.placement)) ?? "").trim();
+        return {
+          campaignId: row.campaignId,
+          placement: row.placement,
+          decision:
+            decision === PLACEMENT_DECISION_EXCLUDE
+              ? ("exclude" as const)
+              : decision === PLACEMENT_DECISION_KEEP
+                ? ("keep" as const)
+                : ("" as const),
+        };
+      }),
+    };
+  };
+
+  return { publishDay, pullDecisions, shareByLink, refreshLibraryColumn, publishPlacements };
 };

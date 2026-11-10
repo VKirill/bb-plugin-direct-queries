@@ -27,6 +27,17 @@ const REPORT_FIELDS = [
   "Conversions",
 ];
 
+const PLACEMENT_FIELDS = [
+  "CampaignId",
+  "CampaignName",
+  "Placement",
+  "AdNetworkType",
+  "Impressions",
+  "Clicks",
+  "Cost",
+  "Conversions",
+];
+
 export class DirectApiError extends Error {
   readonly code: number;
   readonly detail?: string;
@@ -121,19 +132,19 @@ function parseCell(cell: string): string | number | null {
   return Number.isNaN(n) ? cell : n;
 }
 
-function parseTsv(text: string): SearchQueryRow[] {
+function parseTsv(text: string, fields: string[] = REPORT_FIELDS): SearchQueryRow[] {
   const lines = text.split(/\r?\n/).filter((line) => line.length > 0);
   if (!lines.length) return [];
-  let fields: string[] = REPORT_FIELDS;
+  let cols = fields;
   const first = lines[0].split("\t");
-  if (first.length > 1 && first.every((cell) => REPORT_FIELDS.includes(cell))) {
-    fields = first;
+  if (first.length > 1 && first.every((cell) => fields.includes(cell))) {
+    cols = first;
     lines.shift();
   }
   return lines.map((line) => {
     const cells = line.split("\t");
     const row: SearchQueryRow = {};
-    fields.forEach((field, i) => {
+    cols.forEach((field, i) => {
       row[field] = parseCell(cells[i] ?? "");
     });
     return row;
@@ -286,6 +297,22 @@ export function createDirectClient(opts: DirectClientOptions) {
     } while (limitedBy !== undefined);
   }
 
+  async function reportRows(
+    params: Record<string, unknown>,
+    fields: string[],
+  ): Promise<SearchQueryRow[]> {
+    for (let attempt = 1; attempt <= MAX_REPORT_TRIES; attempt++) {
+      try {
+        return parseTsv(await transport.report(params), fields);
+      } catch (e) {
+        if (!(e instanceof DirectApiError) || e.code !== 202) throw e;
+        if (attempt === MAX_REPORT_TRIES) break;
+        await sleep(DEFAULT_RETRY_IN_SEC * 1000);
+      }
+    }
+    throw new DirectApiError(0, "report not ready", `still pending after ${MAX_REPORT_TRIES} tries`);
+  }
+
   return {
     get units(): DirectUnits | undefined {
       return transport.units;
@@ -429,6 +456,33 @@ export function createDirectClient(opts: DirectClientOptions) {
       return res.Clients ?? [];
     },
 
+    async campaignExcludedSites(ids: number[]): Promise<Map<number, string[]>> {
+      const out = new Map<number, string[]>();
+      for (let i = 0; i < ids.length; i += CRITERIA_BATCH) {
+        const batch = ids.slice(i, i + CRITERIA_BATCH);
+        const res = await call<{
+          Campaigns: { Id: number; ExcludedSites?: { Items?: string[] } }[];
+        }>("campaigns", "get", {
+          SelectionCriteria: { Ids: batch },
+          FieldNames: ["Id", "ExcludedSites"],
+        });
+        for (const campaign of res.Campaigns ?? []) {
+          out.set(campaign.Id, campaign.ExcludedSites?.Items ?? []);
+        }
+      }
+      return out;
+    },
+
+    async updateExcludedSites(items: { id: number; sites: string[] }[]): Promise<unknown> {
+      const res = await call<{ UpdateResults: unknown[] }>("campaigns", "update", {
+        Campaigns: items.map((item) => ({
+          Id: item.id,
+          ExcludedSites: { Items: item.sites },
+        })),
+      });
+      return res.UpdateResults;
+    },
+
     async searchQueryReport(args: {
       dateFrom: string;
       dateTo: string;
@@ -452,16 +506,38 @@ export function createDirectClient(opts: DirectClientOptions) {
         IncludeVAT: "YES",
         IncludeDiscount: "NO",
       };
-      for (let attempt = 1; attempt <= MAX_REPORT_TRIES; attempt++) {
-        try {
-          return parseTsv(await transport.report(params));
-        } catch (e) {
-          if (!(e instanceof DirectApiError) || e.code !== 202) throw e;
-          if (attempt === MAX_REPORT_TRIES) break;
-          await sleep(DEFAULT_RETRY_IN_SEC * 1000);
-        }
-      }
-      throw new DirectApiError(0, "report not ready", `still pending after ${MAX_REPORT_TRIES} tries`);
+      return reportRows(params, REPORT_FIELDS);
+    },
+
+    async placementsReport(args: {
+      dateFrom: string;
+      dateTo: string;
+      campaignIds?: number[];
+      reportName?: string;
+    }): Promise<SearchQueryRow[]> {
+      const filter = [
+        { Field: "AdNetworkType", Operator: "EQUALS", Values: ["AD_NETWORK"] },
+        ...(args.campaignIds?.length
+          ? [{ Field: "CampaignId", Operator: "IN", Values: args.campaignIds.map(String) }]
+          : []),
+      ];
+      const params = {
+        SelectionCriteria: {
+          DateFrom: args.dateFrom,
+          DateTo: args.dateTo,
+          Filter: filter,
+        },
+        FieldNames: PLACEMENT_FIELDS,
+        ReportName:
+          args.reportName ??
+          `direct-queries placements ${args.dateFrom}_${args.dateTo} ${Math.floor(now() / 1000)}`,
+        ReportType: "CUSTOM_REPORT",
+        DateRangeType: "CUSTOM_DATE",
+        Format: "TSV",
+        IncludeVAT: "YES",
+        IncludeDiscount: "NO",
+      };
+      return reportRows(params, PLACEMENT_FIELDS);
     },
   };
 }

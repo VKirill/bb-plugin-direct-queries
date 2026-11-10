@@ -370,6 +370,27 @@ function liveDeps(
       });
       await sheets.refreshLibraryColumn(sheetId, inLibrary);
     },
+    placementsReport: async ({ account, clientLogin, dateFrom, dateTo, campaignIds }) => {
+      const client = await directClientFor(account, clientLogin);
+      return client.placementsReport({ dateFrom, dateTo, campaignIds });
+    },
+    publishPlacements: async ({ sheetId, rows }) => {
+      const sheets = createSheetsClient({
+        clientId: await secrets.get("googleClientId"),
+        clientSecret: await secrets.get("googleClientSecret"),
+        refreshToken: await secrets.get("googleRefreshToken"),
+        fetch: fetchFn,
+      });
+      return sheets.publishPlacements(sheetId, rows);
+    },
+    campaignExcludedSites: async ({ account, clientLogin, campaignIds }) => {
+      const client = await directClientFor(account, clientLogin);
+      return client.campaignExcludedSites(campaignIds);
+    },
+    updateExcludedSites: async ({ account, clientLogin, items }) => {
+      const client = await directClientFor(account, clientLogin);
+      return client.updateExcludedSites(items.map((i) => ({ id: i.campaignId, sites: i.sites })));
+    },
     listDirectInventory: async ({ account, clientLogin }) => {
       const client = await directClientFor(account, clientLogin);
       const campaigns = await client.campaigns();

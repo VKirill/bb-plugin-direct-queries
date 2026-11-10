@@ -5,6 +5,7 @@ import {
   passportCompleteness,
   type LedgerRow,
   type NegativesLevel,
+  type PlacementTemplateId,
   type Project,
 } from "../model.ts";
 import type { en } from "../i18n.ts";
@@ -65,6 +66,7 @@ function emptyPipeline(): Project {
       serp: { enabled: true, budget: 25, lr: 225, device: "desktop" },
       library: { enabled: true, apply: false },
       negatives: { level: "library", apply: false },
+      placements: { enabled: false, template: "safe", apply: false, days: 7 },
       schedule: {
         hour: 3,
         mode: "daily",
@@ -98,6 +100,12 @@ export function PipelineForm({
   const pipe = draft.pipeline!;
   const passport = passportCompleteness(pipe.profile);
   const account = accounts.find((a) => a.id === pipe.accountId);
+  const placements = pipe.placements ?? {
+    enabled: false,
+    template: "safe" as const,
+    apply: false,
+    days: 7,
+  };
 
   useEffect(() => {
     rpc.call("accounts.list", null).then((r) => setAccounts(r as Account[]));
@@ -461,6 +469,46 @@ export function PipelineForm({
         <Input
           value={(pipe.schedule.syncHours ?? []).join(", ")}
           onChange={(e) => setPipe({ schedule: { ...pipe.schedule, syncHours: parseHours(e.target.value) } })}
+        />
+      </div>
+      <h3>{t.placementsTitle}</h3>
+      <div className="dq-field">
+        <Label>{t.analyzePlacements}</Label>
+        <Switch
+          checked={placements.enabled}
+          onCheckedChange={(v) => setPipe({ placements: { ...placements, enabled: v } })}
+        />
+      </div>
+      <div className="dq-field">
+        <Label>{t.placementTemplate}</Label>
+        <select
+          value={placements.template ?? "safe"}
+          onChange={(e) =>
+            setPipe({
+              placements: { ...placements, template: e.target.value as PlacementTemplateId },
+            })
+          }
+        >
+          <option value="safe">{t.templateSafe}</option>
+          <option value="apps-and-games">{t.templateAppsGames}</option>
+          <option value="strict">{t.templateStrict}</option>
+        </select>
+      </div>
+      <div className="dq-field">
+        <Label>{t.reportWindowDays}</Label>
+        <Input
+          type="number"
+          min={1}
+          max={31}
+          value={placements.days ?? 7}
+          onChange={(e) => setPipe({ placements: { ...placements, days: Number(e.target.value) } })}
+        />
+      </div>
+      <div className="dq-field">
+        <Label>{t.excludeInDirect}</Label>
+        <Switch
+          checked={placements.apply ?? false}
+          onCheckedChange={(v) => setPipe({ placements: { ...placements, apply: v } })}
         />
       </div>
       <div className="dq-actions">
