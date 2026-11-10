@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-direct-queries",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "type": "module",
   "private": false,
   "engines": {
@@ -9,7 +9,7 @@
   },
   "bb": {
     "name": "Direct Queries",
-    "description": "Registry, nightly pipeline, run ledger and dashboard for Yandex Direct search-query analysis and negatives.",
+    "description": "Registry, nightly pipeline, run ledger and dashboard for Yandex Direct search-query analysis and negatives, with OhMySEO import and RSYA placements.",
     "branding": {
       "icon": "./assets/icon.svg",
       "logo": {
