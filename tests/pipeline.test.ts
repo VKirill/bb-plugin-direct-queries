@@ -181,4 +181,94 @@ describe("runPipeline", () => {
     expect(calls.judge).toBe(0);
     expect(calls.publish).toBe(1);
   });
+
+  it("reportDay today passes the run day to the search-query report", async () => {
+    const seen: string[] = [];
+    const { deps } = fakes({
+      searchQueryReport: async ({ date }) => {
+        seen.push(date);
+        return [reportRow()];
+      },
+    });
+    const todayProject = {
+      ...project,
+      pipeline: {
+        ...project.pipeline!,
+        schedule: { ...project.pipeline!.schedule, reportDay: "today" as const },
+      },
+    };
+    await runPipeline(deps, todayProject, "2026-11-04", { trigger: "schedule" });
+    expect(seen).toEqual(["2026-11-04"]);
+  });
+
+  it("a second scheduled run for the same day fetches the report again", async () => {
+    let reportCalls = 0;
+    const { deps } = fakes({
+      searchQueryReport: async () => {
+        reportCalls += 1;
+        return [reportRow()];
+      },
+    });
+    await runPipeline(deps, project, "2026-11-03", { trigger: "schedule" });
+    await runPipeline(deps, project, "2026-11-03", { trigger: "schedule" });
+    expect(reportCalls).toBe(2);
+  });
+
+  it("negatives level campaign calls applyNegatives with resolved targets and skips the library", async () => {
+    const calls: {
+      level?: string;
+      apply?: boolean;
+      approved?: { phrase: string; campaignId?: number; adGroupId?: number; campaign?: string }[];
+    }[] = [];
+    const { deps, calls: lib } = fakes({
+      pullDecisions: async () => [
+        { query: "фильтр цех", campaign: "Search", decision: "minus", comment: "", date: "2026-11-03" },
+      ],
+      applyNegatives: async (args) => {
+        calls.push(args);
+        return { campaigns: [], groups: [], keywords: [], skipped: [], errors: [], applied: args.apply };
+      },
+    });
+    const campaignProject = {
+      ...project,
+      pipeline: {
+        ...project.pipeline!,
+        negatives: { level: "campaign" as const, apply: true },
+      },
+    };
+    await runPipeline(deps, campaignProject, "2026-11-03", { trigger: "schedule" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].level).toBe("campaign");
+    expect(calls[0].apply).toBe(true);
+    expect(calls[0].approved).toEqual([
+      { query: "фильтр цех", phrase: "фильтр цех", campaignId: 11, adGroupId: 22, campaign: "Search" },
+    ]);
+    expect(lib.libraryApply).toEqual([]);
+  });
+
+  it("negatives apply false plans without writes", async () => {
+    const calls: { apply?: boolean }[] = [];
+    const { deps } = fakes({
+      pullDecisions: async () => [
+        { query: "фильтр цех", campaign: "Search", decision: "minus", comment: "", date: "2026-11-03" },
+      ],
+      applyNegatives: async (args) => {
+        calls.push(args);
+        return { campaigns: [], groups: [], keywords: [], skipped: [], errors: [], applied: args.apply };
+      },
+    });
+    const planProject = {
+      ...project,
+      pipeline: {
+        ...project.pipeline!,
+        negatives: { level: "adgroup" as const, apply: false },
+      },
+    };
+    const rows = await runPipeline(deps, planProject, "2026-11-03", { trigger: "schedule" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].apply).toBe(false);
+    const library = rows.find((r) => r.stageId === "library")!;
+    expect(library.status).toBe("ok");
+    expect(library.firstError).toContain("plan only");
+  });
 });

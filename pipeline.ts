@@ -1,7 +1,12 @@
 import type { Campaign } from "./direct.ts";
-import { phrase, type ApprovedPhrase } from "./library.ts";
+import type {
+  ApplyNegativesLevel,
+  ApprovedNegative,
+  NegativesResult,
+} from "./apply-negatives.ts";
+import { phrase, phraseKey, type ApprovedPhrase } from "./library.ts";
 import type { Feedback, JudgeItem, JudgeResult, SiteProfile } from "./judge.ts";
-import type { LedgerRow, Project, ProjectPipeline } from "./model.ts";
+import { negativesConfig, type LedgerRow, type Project, type ProjectPipeline } from "./model.ts";
 import { negativeCandidates, suggestPhrases, type AuditRow } from "./negatives.ts";
 import { buildReviewRows, type ReviewRow } from "./review.ts";
 import type { SerpAuditRow, SerpReview } from "./serp.ts";
@@ -61,6 +66,13 @@ export type PipelineDeps = {
     account: AccountRow;
     clientLogin?: string;
   }) => Promise<{ added: number; created: number }>;
+  applyNegatives?: (args: {
+    level: ApplyNegativesLevel;
+    apply: boolean;
+    approved: ApprovedNegative[];
+    account: AccountRow;
+    clientLogin?: string;
+  }) => Promise<NegativesResult>;
   refreshLibraryColumn?: (sheetId: string, inLibrary: (query: string) => boolean) => Promise<void>;
   listDirectInventory?: (args: {
     account: AccountRow;
@@ -121,6 +133,31 @@ function toQueryRows(projectId: string, day: string, rows: SearchQueryRow[]): Qu
     conversions: num(r.Conversions),
   }));
 }
+
+const approvedNegatives = (feedback: FeedbackRow[], queries: QueryRow[]): ApprovedNegative[] => {
+  const seen = new Set<string>();
+  const out: ApprovedNegative[] = [];
+  for (const f of feedback) {
+    if (f.decision !== "minus") continue;
+    const itemPhrase = phrase(f.query);
+    const matches = queries.filter(
+      (q) => normQuery(q.query) === normQuery(f.query) && (f.campaign === "" || q.campaign === f.campaign),
+    );
+    for (const q of matches.length ? matches : [undefined]) {
+      const key = `${phraseKey(itemPhrase)}\t${q?.campaignId ?? ""}\t${q?.adGroupId ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        query: f.query,
+        phrase: itemPhrase,
+        campaignId: q?.campaignId || undefined,
+        adGroupId: q?.adGroupId || undefined,
+        campaign: q?.campaign || f.campaign || undefined,
+      });
+    }
+  }
+  return out;
+};
 
 async function campaignIdsFor(
   deps: PipelineDeps,
@@ -389,14 +426,43 @@ export async function runPipeline(
     if (uploadResult === "failed") return rows;
   }
 
+  const negatives = negativesConfig(pipe);
   if (!pipe.library.enabled) {
     rows.push(stageRow(ctx, "library", iso(deps.now()), iso(deps.now()), "skipped"));
   } else {
     await runStage("library", false, async () => {
+      const apply = negatives.apply && !dryRun;
+      if (negatives.level !== "library") {
+        if (!deps.applyNegatives) {
+          return { status: "skipped" as const, firstError: "applyNegatives not wired" };
+        }
+        const result = await deps.applyNegatives({
+          level: negatives.level,
+          apply,
+          approved: approvedNegatives(feedbackRows, queries),
+          account: directAccount!,
+          clientLogin: pipe.clientLogin,
+        });
+        const planned =
+          result.campaigns.reduce((n, c) => n + c.added.length, 0) +
+          result.groups.reduce((n, g) => n + g.added.length, 0) +
+          result.keywords.reduce((n, k) => n + k.minusWords.length, 0);
+        const notes: string[] = [];
+        if (dryRun || !apply) notes.push("plan only");
+        const notPlaced =
+          result.campaigns.reduce((n, c) => n + c.overflow.length, 0) +
+          result.groups.reduce((n, g) => n + g.overflow.length, 0) +
+          result.skipped.length +
+          result.errors.length;
+        if (notPlaced) notes.push(`${notPlaced} not placed`);
+        return {
+          rowsOut: apply ? planned : 0,
+          firstError: notes.join("; ") || undefined,
+        };
+      }
       const approved: ApprovedPhrase[] = feedbackRows
         .filter((f) => f.decision === "minus")
         .map((f) => ({ phrase: phrase(f.query), campaignId: undefined }));
-      const apply = pipe.library.apply && !dryRun;
       const result = await deps.syncLibrary({
         apply,
         approved,
@@ -448,7 +514,7 @@ export async function runLibrarySync(
       }
     }
     const result = await deps.syncLibrary({
-      apply: pipe.library.apply && !opts.dryRun,
+      apply: negativesConfig(pipe).apply && !opts.dryRun,
       approved,
       account: fresh,
       clientLogin: pipe.clientLogin,

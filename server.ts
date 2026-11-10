@@ -52,6 +52,7 @@ import { createSheetsClient } from "./sheets.ts";
 import { createJudge } from "./judge.ts";
 import { createSerp } from "./serp.ts";
 import { applyLibrarySync, planLibrarySync, phrase } from "./library.ts";
+import { applyNegatives } from "./apply-negatives.ts";
 import { suggestPhrases } from "./negatives.ts";
 
 const importPayloadSchema = z.object({
@@ -351,6 +352,14 @@ function liveDeps(
       const keywords = ids.length ? await client.keywords(ids) : [];
       const plan = planLibrarySync({ campaigns, groups, sharedSets, keywords, approved });
       return applyLibrarySync(client, plan, { apply });
+    },
+    applyNegatives: async ({ level, apply, approved, account, clientLogin }) => {
+      const client = await directClientFor(account, clientLogin);
+      const campaigns = await client.campaigns();
+      const ids = campaigns.map((c) => c.Id);
+      const groups = ids.length ? await client.adGroups(ids) : [];
+      const keywords = ids.length ? await client.keywords(ids) : [];
+      return applyNegatives(client, { level, apply, approved, campaigns, groups, keywords });
     },
     refreshLibraryColumn: async (sheetId, inLibrary) => {
       const sheets = createSheetsClient({

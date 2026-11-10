@@ -74,34 +74,54 @@ export function passportCompleteness(profile: SiteProfile): {
   };
 }
 
-export const pipelineSchema = z.object({
-  accountId: z.string(),
-  clientLogin: z.string().optional(),
-  campaignFilter: z
-    .object({
-      ids: z.array(z.number()).optional(),
-      nameContains: z.string().optional(),
-    })
-    .optional(),
-  sheetId: z.string().optional(),
-  profile: siteProfileSchema,
-  serp: z.object({
-    enabled: z.boolean(),
-    budget: z.number().default(25),
-    lr: z.number().default(225),
-    device: z.string(),
-  }),
-  library: z.object({
-    enabled: z.boolean(),
-    apply: z.boolean(),
-  }),
-  schedule: z.object({
-    hour: z.number().int().min(0).max(23).default(3),
-    catchUpHours: z.array(z.number().int().min(0).max(23)).default([4, 6, 9, 12]),
-    syncHours: z.array(z.number().int().min(0).max(23)).default([0, 4, 8, 12, 16, 20]),
-  }),
-});
-export type ProjectPipeline = z.infer<typeof pipelineSchema>;
+export const negativesLevelSchema = z.enum(["library", "campaign", "adgroup", "keyword"]);
+export type NegativesLevel = z.infer<typeof negativesLevelSchema>;
+
+export const pipelineSchema = z
+  .object({
+    accountId: z.string(),
+    clientLogin: z.string().optional(),
+    campaignFilter: z
+      .object({
+        ids: z.array(z.number()).optional(),
+        nameContains: z.string().optional(),
+      })
+      .optional(),
+    sheetId: z.string().optional(),
+    profile: siteProfileSchema,
+    serp: z.object({
+      enabled: z.boolean(),
+      budget: z.number().default(25),
+      lr: z.number().default(225),
+      device: z.string(),
+    }),
+    library: z.object({
+      enabled: z.boolean(),
+      apply: z.boolean(),
+    }),
+    schedule: z.object({
+      hour: z.number().int().min(0).max(23).default(3),
+      mode: z.enum(["daily", "twice", "custom"]).default("daily"),
+      hours: z.array(z.number().int().min(0).max(23)).default([]),
+      reportDay: z.enum(["yesterday", "today"]).default("yesterday"),
+      catchUpHours: z.array(z.number().int().min(0).max(23)).default([4, 6, 9, 12]),
+      syncHours: z.array(z.number().int().min(0).max(23)).default([0, 4, 8, 12, 16, 20]),
+    }),
+    negatives: z
+      .object({
+        level: negativesLevelSchema.default("library"),
+        apply: z.boolean().optional(),
+      })
+      .optional(),
+  })
+  .transform((pipe) => ({
+    ...pipe,
+    negatives: {
+      level: pipe.negatives?.level ?? ("library" as const),
+      apply: pipe.negatives?.apply ?? pipe.library.apply,
+    },
+  }));
+export type ProjectPipeline = z.input<typeof pipelineSchema>;
 
 const ALL_DAYS = [1, 2, 3, 4, 5, 6, 7];
 
@@ -132,28 +152,47 @@ export const PIPELINE_NIGHT_STAGES: Stage[] = [
   stage("library", "Синхронизация минусов", false),
 ];
 
+export function scheduleHours(schedule: ProjectPipeline["schedule"]): number[] {
+  const hour = schedule.hour ?? 3;
+  if (schedule.mode === "twice") return [hour, (hour + 12) % 24];
+  if (schedule.mode === "custom") {
+    const hours = [...new Set(schedule.hours ?? [])]
+      .filter((h) => Number.isInteger(h) && h >= 0 && h <= 23)
+      .sort((a, b) => a - b);
+    if (hours.length > 0) return hours;
+  }
+  return [hour];
+}
+
+export function negativesConfig(pipe: ProjectPipeline): { level: NegativesLevel; apply: boolean } {
+  return {
+    level: pipe.negatives?.level ?? "library",
+    apply: pipe.negatives?.apply ?? pipe.library.apply,
+  };
+}
+
 export function pipelineJobs(pipeline: ProjectPipeline): Job[] {
-  const hour = pipeline.schedule.hour;
+  const schedule = pipeline.schedule;
   const jobs: Job[] = [
     {
       id: "night-export",
       title: "Ночная выгрузка",
-      hours: [hour],
+      hours: scheduleHours(schedule),
       minute: 0,
       weekdays: ALL_DAYS,
-      reportDay: "yesterday",
+      reportDay: schedule.reportDay ?? "yesterday",
       prelude: "",
       stages: PIPELINE_NIGHT_STAGES,
-      catchUpHours: pipeline.schedule.catchUpHours,
+      catchUpHours: schedule.catchUpHours ?? [4, 6, 9, 12],
       timeoutMin: 300,
       enabled: true,
     },
   ];
-  if (pipeline.library.enabled) {
+  if (pipeline.library.enabled && negativesConfig(pipeline).level === "library") {
     jobs.push({
       id: "library-sync",
       title: "Синхронизация минусов",
-      hours: pipeline.schedule.syncHours,
+      hours: pipeline.schedule.syncHours ?? [0, 4, 8, 12, 16, 20],
       minute: 0,
       weekdays: ALL_DAYS,
       reportDay: "today",
@@ -194,7 +233,9 @@ export const projectSchema = z
     },
     { message: "project needs jobs and host, or a pipeline" },
   );
-export type Project = z.infer<typeof projectSchema>;
+export type Project = Omit<z.infer<typeof projectSchema>, "pipeline"> & {
+  pipeline?: ProjectPipeline;
+};
 
 export function jobsOf(project: Project): Job[] {
   if (project.pipeline) return pipelineJobs(project.pipeline);
