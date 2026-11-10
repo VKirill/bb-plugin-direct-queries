@@ -12,6 +12,7 @@ export const SECRET_NAMES = [
   "googleClientSecret",
   "googleRefreshToken",
   "telegramBotToken",
+  "ohmyseoAuth",
 ] as const;
 export type SecretName = (typeof SECRET_NAMES)[number];
 
@@ -26,6 +27,7 @@ export const CATALOG_NAMES: Record<SecretName, string> = {
   googleClientSecret: "GOOGLE_SHEETS_CLIENT_SECRET",
   googleRefreshToken: "GOOGLE_SHEETS_REFRESH_TOKEN",
   telegramBotToken: "TG_AIVECH_BOT",
+  ohmyseoAuth: "OHMY_SEO_MCP_AUTH",
 };
 
 export class MissingSecret extends Error {
@@ -61,6 +63,7 @@ export function createSecrets(bb: Pick<BbPluginApi, "settings" | "sdk">): Secret
     googleClientSecret: { type: "string", label: "Google Sheets client secret", secret: true },
     googleRefreshToken: { type: "string", label: "Google Sheets refresh token", secret: true },
     telegramBotToken: { type: "string", label: "Telegram bot token", secret: true },
+    ohmyseoAuth: { type: "string", label: "OhMySEO MCP auth", secret: true },
   });
 
   const fromCatalog = async (name: SecretName): Promise<string | undefined> => {

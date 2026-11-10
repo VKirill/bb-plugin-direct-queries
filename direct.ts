@@ -85,6 +85,11 @@ export interface AgencyClient {
 
 type SleepFn = (ms: number) => Promise<void>;
 
+export interface DirectTransport {
+  call(service: string, method: string, params: unknown): Promise<unknown>;
+  report(params: unknown): Promise<string>;
+}
+
 interface CallResult {
   [key: string]: unknown;
   LimitedBy?: number;
@@ -133,15 +138,17 @@ function parseTsv(text: string): SearchQueryRow[] {
   });
 }
 
-export function createDirectClient(opts: {
+interface HttpTransport extends DirectTransport {
+  readonly units?: DirectUnits;
+}
+
+function createHttpTransport(opts: {
   token: string;
   clientLogin?: string;
   fetch: FetchFn;
-  sleep?: SleepFn;
-  now?: () => number;
-}) {
-  const sleep = opts.sleep ?? defaultSleep;
-  const now = opts.now ?? Date.now;
+  sleep: SleepFn;
+}): HttpTransport {
+  const sleep = opts.sleep;
   let units: DirectUnits | undefined;
 
   const headers = (extra?: Record<string, string>): Record<string, string> => ({
@@ -152,7 +159,7 @@ export function createDirectClient(opts: {
     ...extra,
   });
 
-  async function call<T = CallResult>(service: string, method: string, params: unknown): Promise<T> {
+  async function call(service: string, method: string, params: unknown): Promise<unknown> {
     for (let attempt = 1; ; attempt++) {
       const res = await opts.fetch(`${BASE_URL}${service}`, {
         method: "POST",
@@ -175,7 +182,7 @@ export function createDirectClient(opts: {
         }
         throw err;
       }
-      if (res.status === 200) return (body.result ?? body) as T;
+      if (res.status === 200) return body.result ?? body;
       if (res.status >= 500 && attempt <= MAX_RETRIES) {
         await sleep(1000 * attempt);
         continue;
@@ -183,6 +190,82 @@ export function createDirectClient(opts: {
       throw new DirectApiError(res.status, `http ${res.status}`, text.slice(0, 300));
     }
   }
+
+  async function report(params: unknown): Promise<string> {
+    const reportHeaders = headers({
+      processingMode: "auto",
+      returnMoneyInMicros: "false",
+      skipReportHeader: "true",
+      skipReportSummary: "true",
+    });
+    for (let attempt = 1; attempt <= MAX_REPORT_TRIES; attempt++) {
+      const res = await opts.fetch(`${BASE_URL}reports`, {
+        method: "POST",
+        headers: reportHeaders,
+        body: JSON.stringify({ params }),
+      });
+      units = parseUnits(res.headers.get("Units")) ?? units;
+      if (res.status === 201 || res.status === 202) {
+        const wait = Number(res.headers.get("retryIn")) || DEFAULT_RETRY_IN_SEC;
+        await sleep(wait * 1000);
+        continue;
+      }
+      const text = await res.text();
+      if (res.status === 200) return text;
+      let parsed: Record<string, unknown> = {};
+      try {
+        parsed = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        // plain-text error page
+      }
+      if (parsed.error) throw toError(parsed.error, res.status);
+      if (res.status >= 500 && attempt <= MAX_RETRIES) {
+        await sleep(1000 * attempt);
+        continue;
+      }
+      throw new DirectApiError(res.status, `http ${res.status}`, text.slice(0, 300));
+    }
+    throw new DirectApiError(0, "report not ready", `still pending after ${MAX_REPORT_TRIES} tries`);
+  }
+
+  return {
+    call,
+    report,
+    get units() {
+      return units;
+    },
+  };
+}
+
+export type DirectClientOptions =
+  | {
+      token: string;
+      clientLogin?: string;
+      fetch: FetchFn;
+      sleep?: SleepFn;
+      now?: () => number;
+    }
+  | {
+      transport: DirectTransport;
+      sleep?: SleepFn;
+      now?: () => number;
+    };
+
+export function createDirectClient(opts: DirectClientOptions) {
+  const sleep = opts.sleep ?? defaultSleep;
+  const now = opts.now ?? Date.now;
+  const transport: DirectTransport & { readonly units?: DirectUnits } =
+    "transport" in opts
+      ? opts.transport
+      : createHttpTransport({
+          token: opts.token,
+          clientLogin: opts.clientLogin,
+          fetch: opts.fetch,
+          sleep,
+        });
+
+  const call = <T = CallResult>(service: string, method: string, params: unknown): Promise<T> =>
+    transport.call(service, method, params) as Promise<T>;
 
   async function* paged(
     service: string,
@@ -203,7 +286,7 @@ export function createDirectClient(opts: {
 
   return {
     get units(): DirectUnits | undefined {
-      return units;
+      return transport.units;
     },
 
     async campaigns(filter?: { states?: string[]; ids?: number[] }): Promise<Campaign[]> {
@@ -317,57 +400,31 @@ export function createDirectClient(opts: {
       campaignIds?: number[];
       reportName?: string;
     }): Promise<SearchQueryRow[]> {
-      const body = {
-        params: {
-          SelectionCriteria: {
-            DateFrom: args.dateFrom,
-            DateTo: args.dateTo,
-            ...(args.campaignIds?.length
-              ? { Filter: [{ Field: "CampaignId", Operator: "IN", Values: args.campaignIds.map(String) }] }
-              : {}),
-          },
-          FieldNames: REPORT_FIELDS,
-          ReportName:
-            args.reportName ?? `direct-queries ${args.dateFrom}_${args.dateTo} ${Math.floor(now() / 1000)}`,
-          ReportType: "SEARCH_QUERY_PERFORMANCE_REPORT",
-          DateRangeType: "CUSTOM_DATE",
-          Format: "TSV",
-          IncludeVAT: "YES",
-          IncludeDiscount: "NO",
+      const params = {
+        SelectionCriteria: {
+          DateFrom: args.dateFrom,
+          DateTo: args.dateTo,
+          ...(args.campaignIds?.length
+            ? { Filter: [{ Field: "CampaignId", Operator: "IN", Values: args.campaignIds.map(String) }] }
+            : {}),
         },
+        FieldNames: REPORT_FIELDS,
+        ReportName:
+          args.reportName ?? `direct-queries ${args.dateFrom}_${args.dateTo} ${Math.floor(now() / 1000)}`,
+        ReportType: "SEARCH_QUERY_PERFORMANCE_REPORT",
+        DateRangeType: "CUSTOM_DATE",
+        Format: "TSV",
+        IncludeVAT: "YES",
+        IncludeDiscount: "NO",
       };
-      const reportHeaders = headers({
-        processingMode: "auto",
-        returnMoneyInMicros: "false",
-        skipReportHeader: "true",
-        skipReportSummary: "true",
-      });
       for (let attempt = 1; attempt <= MAX_REPORT_TRIES; attempt++) {
-        const res = await opts.fetch(`${BASE_URL}reports`, {
-          method: "POST",
-          headers: reportHeaders,
-          body: JSON.stringify(body),
-        });
-        units = parseUnits(res.headers.get("Units")) ?? units;
-        if (res.status === 201 || res.status === 202) {
-          const wait = Number(res.headers.get("retryIn")) || DEFAULT_RETRY_IN_SEC;
-          await sleep(wait * 1000);
-          continue;
-        }
-        const text = await res.text();
-        if (res.status === 200) return parseTsv(text);
-        let parsed: Record<string, unknown> = {};
         try {
-          parsed = JSON.parse(text) as Record<string, unknown>;
-        } catch {
-          // plain-text error page
+          return parseTsv(await transport.report(params));
+        } catch (e) {
+          if (!(e instanceof DirectApiError) || e.code !== 202) throw e;
+          if (attempt === MAX_REPORT_TRIES) break;
+          await sleep(DEFAULT_RETRY_IN_SEC * 1000);
         }
-        if (parsed.error) throw toError(parsed.error, res.status);
-        if (res.status >= 500 && attempt <= MAX_RETRIES) {
-          await sleep(1000 * attempt);
-          continue;
-        }
-        throw new DirectApiError(res.status, `http ${res.status}`, text.slice(0, 300));
       }
       throw new DirectApiError(0, "report not ready", `still pending after ${MAX_REPORT_TRIES} tries`);
     },

@@ -59,10 +59,21 @@ export const MIGRATIONS: string[] = [
     expires_at INTEGER,
     PRIMARY KEY (ns, key)
   )`,
+  `ALTER TABLE accounts ADD COLUMN source TEXT NOT NULL DEFAULT 'yandex'`,
+  `ALTER TABLE accounts ADD COLUMN ohmy_label TEXT`,
 ];
 
+const ADD_COLUMN = /^ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)/i;
+
 export function applyMigrations(db: Database.Database): void {
-  for (const sql of MIGRATIONS) db.exec(sql);
+  for (const sql of MIGRATIONS) {
+    const alter = ADD_COLUMN.exec(sql.trim());
+    if (alter) {
+      const columns = db.prepare(`PRAGMA table_info(${alter[1]})`).all() as Array<{ name: string }>;
+      if (columns.some((c) => c.name === alter[2])) continue;
+    }
+    db.exec(sql);
+  }
 }
 
 export type AccountRow = {
@@ -74,6 +85,8 @@ export type AccountRow = {
   refreshToken: string;
   expiresAt: number;
   createdAt: number;
+  source: "yandex" | "ohmyseo";
+  ohmyLabel?: string;
 };
 
 export type QueryRow = {
@@ -121,6 +134,8 @@ type AccountSql = {
   refresh_token: string;
   expires_at: number;
   created_at: number;
+  source: string | null;
+  ohmy_label: string | null;
 };
 
 const toAccount = (row: AccountSql): AccountRow => ({
@@ -132,19 +147,23 @@ const toAccount = (row: AccountSql): AccountRow => ({
   refreshToken: row.refresh_token,
   expiresAt: row.expires_at,
   createdAt: row.created_at,
+  source: row.source === "ohmyseo" ? "ohmyseo" : "yandex",
+  ohmyLabel: row.ohmy_label ?? undefined,
 });
 
 export function upsertAccount(db: Database.Database, account: AccountRow): void {
   db.prepare(
-    `INSERT INTO accounts (id, login, display_name, is_agency, access_token, refresh_token, expires_at, created_at)
-     VALUES (@id, @login, @display_name, @is_agency, @access_token, @refresh_token, @expires_at, @created_at)
+    `INSERT INTO accounts (id, login, display_name, is_agency, access_token, refresh_token, expires_at, created_at, source, ohmy_label)
+     VALUES (@id, @login, @display_name, @is_agency, @access_token, @refresh_token, @expires_at, @created_at, @source, @ohmy_label)
      ON CONFLICT(id) DO UPDATE SET
        login=excluded.login,
        display_name=excluded.display_name,
        is_agency=excluded.is_agency,
        access_token=excluded.access_token,
        refresh_token=excluded.refresh_token,
-       expires_at=excluded.expires_at`,
+       expires_at=excluded.expires_at,
+       source=excluded.source,
+       ohmy_label=excluded.ohmy_label`,
   ).run({
     id: account.id,
     login: account.login,
@@ -154,6 +173,8 @@ export function upsertAccount(db: Database.Database, account: AccountRow): void 
     refresh_token: account.refreshToken,
     expires_at: account.expiresAt,
     created_at: account.createdAt,
+    source: account.source,
+    ohmy_label: account.ohmyLabel ?? null,
   });
 }
 
@@ -352,6 +373,7 @@ export function publicAccount(account: AccountRow): {
   displayName?: string;
   isAgency: boolean;
   expiresAt: number;
+  source: "yandex" | "ohmyseo";
 } {
   return {
     id: account.id,
@@ -359,5 +381,6 @@ export function publicAccount(account: AccountRow): {
     displayName: account.displayName,
     isAgency: account.isAgency,
     expiresAt: account.expiresAt,
+    source: account.source,
   };
 }

@@ -11,8 +11,22 @@ import { oauthStartHref, savePluginSecrets, usePluginId } from "./plugin-id.ts";
 
 type Rpc = ReturnType<typeof useRpc<typeof rpcContract>>;
 type Strings = typeof en;
-type Account = { id: string; login: string; displayName?: string; isAgency: boolean; expiresAt: number };
+type Account = {
+  id: string;
+  login: string;
+  displayName?: string;
+  isAgency: boolean;
+  expiresAt: number;
+  source?: "yandex" | "ohmyseo";
+};
 type AgencyClient = { Login: string; ClientInfo?: string };
+type OhmyAccount = {
+  label: string;
+  yandexLogin: string;
+  isDefault: boolean;
+  denied: boolean;
+  imported: boolean;
+};
 
 function tokenLabel(t: Strings, expiresAt: number, now: number): { text: string; cls: string } {
   if (expiresAt <= now) return { text: t.expired, cls: "dq-pill dq-pill-warn" };
@@ -30,6 +44,9 @@ export function AccountsTab({ t, rpc }: { t: Strings; rpc: Rpc }) {
   const [clientSecret, setClientSecret] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
   const [clients, setClients] = useState<AgencyClient[]>([]);
+  const [ohmy, setOhmy] = useState<OhmyAccount[] | null>(null);
+  const [ohmySel, setOhmySel] = useState<Set<string>>(new Set());
+  const [ohmyErr, setOhmyErr] = useState("");
 
   const reload = useCallback(() => {
     rpc.call("accounts.list", null).then((r) => setAccounts(r as Account[]));
@@ -45,6 +62,27 @@ export function AccountsTab({ t, rpc }: { t: Strings; rpc: Rpc }) {
 
   const signIn = oauthStartHref(pluginId);
   if (accounts === null) return <Skeleton className="dq-skel" />;
+
+  const loadOhmy = () => {
+    setOhmyErr("");
+    void rpc.call("ohmyseoAccounts", null).then(
+      (r) => {
+        setOhmy(r as OhmyAccount[]);
+        setOhmySel(new Set());
+      },
+      (e: unknown) => setOhmyErr(e instanceof Error ? e.message : String(e)),
+    );
+  };
+
+  const importOhmy = () => {
+    void rpc
+      .call("ohmyseoImport", { labels: [...ohmySel] })
+      .then(() => {
+        reload();
+        loadOhmy();
+      })
+      .catch((e: unknown) => setOhmyErr(e instanceof Error ? e.message : String(e)));
+  };
 
   return (
     <div className="dq-section">
@@ -111,6 +149,7 @@ export function AccountsTab({ t, rpc }: { t: Strings; rpc: Rpc }) {
               <TableHeader>
                 <TableRow>
                   <TableHead>{t.login}</TableHead>
+                  <TableHead>{t.source}</TableHead>
                   <TableHead>{t.type}</TableHead>
                   <TableHead>{t.token}</TableHead>
                   <TableHead />
@@ -130,12 +169,25 @@ export function AccountsTab({ t, rpc }: { t: Strings; rpc: Rpc }) {
                       >
                         <TableCell>{a.login}</TableCell>
                         <TableCell>
+                          <span
+                            className={
+                              a.source === "ohmyseo" ? "dq-pill dq-pill-info" : "dq-pill dq-pill-muted"
+                            }
+                          >
+                            {a.source === "ohmyseo" ? t.sourceOhmyseo : t.sourceYandex}
+                          </span>
+                        </TableCell>
+                        <TableCell>
                           <span className={a.isAgency ? "dq-pill dq-pill-info" : "dq-pill dq-pill-muted"}>
                             {a.isAgency ? t.agency : t.directType}
                           </span>
                         </TableCell>
                         <TableCell>
-                          <span className={tok.cls}>{tok.text}</span>
+                          {a.source === "ohmyseo" ? (
+                            "—"
+                          ) : (
+                            <span className={tok.cls}>{tok.text}</span>
+                          )}
                         </TableCell>
                         <TableCell>
                           <Button
@@ -152,7 +204,7 @@ export function AccountsTab({ t, rpc }: { t: Strings; rpc: Rpc }) {
                       </TableRow>
                       {expanded === a.id && a.isAgency && (
                         <TableRow>
-                          <TableCell colSpan={4}>
+                          <TableCell colSpan={5}>
                             <ul className="dq-clients">
                               {clients.map((c) => (
                                 <li key={c.Login}>
@@ -169,6 +221,47 @@ export function AccountsTab({ t, rpc }: { t: Strings; rpc: Rpc }) {
                 })}
               </TableBody>
             </Table>
+          )}
+        </div>
+      </section>
+      <section className="dq-panel">
+        <div className="dq-panel-head">
+          <h3>{t.ohmyseoAccounts}</h3>
+          <Button variant="outline" size="sm" onClick={loadOhmy}>
+            {t.loadOhmyseo}
+          </Button>
+        </div>
+        <div className="dq-panel-body">
+          {ohmyErr && <p className="dq-error">{ohmyErr}</p>}
+          {ohmy !== null && ohmy.length === 0 && <p className="dq-hint">{t.ohmyseoEmpty}</p>}
+          {ohmy !== null && ohmy.length > 0 && (
+            <>
+              {ohmy.map((a) => (
+                <label key={a.label} className="dq-check">
+                  <input
+                    type="checkbox"
+                    checked={ohmySel.has(a.label)}
+                    disabled={a.denied || a.imported}
+                    onChange={(e) => {
+                      const next = new Set(ohmySel);
+                      if (e.target.checked) next.add(a.label);
+                      else next.delete(a.label);
+                      setOhmySel(next);
+                    }}
+                  />
+                  <span>
+                    {a.label} — {a.yandexLogin}
+                    {a.denied ? ` (${t.ohmyDenied})` : ""}
+                    {a.imported ? ` (${t.imported})` : ""}
+                  </span>
+                </label>
+              ))}
+              <div className="dq-actions">
+                <Button size="sm" disabled={ohmySel.size === 0} onClick={importOhmy}>
+                  {t.importSelected}
+                </Button>
+              </div>
+            </>
           )}
         </div>
       </section>
