@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../server.ts";
-import type { LedgerRow, Project } from "../model.ts";
+import { passportCompleteness, type LedgerRow, type Project } from "../model.ts";
 import type { en } from "../i18n.ts";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -83,6 +83,7 @@ export function PipelineForm({
   const [preview, setPreview] = useState<LedgerRow[] | null>(null);
 
   const pipe = draft.pipeline!;
+  const passport = passportCompleteness(pipe.profile);
   const account = accounts.find((a) => a.id === pipe.accountId);
 
   useEffect(() => {
@@ -209,44 +210,120 @@ export function PipelineForm({
           )}
         </div>
       </div>
-      <h3>{t.siteProfile}</h3>
-      <div className="dq-field">
-        <Label>{t.company}</Label>
-        <Input
-          value={pipe.profile.company}
-          onChange={(e) => setPipe({ profile: { ...pipe.profile, company: e.target.value } })}
-        />
+      <div className="dq-card-head">
+        <h3>{t.siteProfile}</h3>
+        <span className="dq-sub">
+          {t.passportProgress
+            .replace("{filled}", String(passport.filled))
+            .replace("{total}", String(passport.total))}
+        </span>
       </div>
-      <div className="dq-field">
-        <Label>{t.buyer}</Label>
-        <Input value={pipe.profile.buyer} onChange={(e) => setPipe({ profile: { ...pipe.profile, buyer: e.target.value } })} />
-      </div>
-      <div className="dq-field dq-field-top">
-        <Label>{t.offers}</Label>
-        <textarea
-          className="dq-json"
-          value={pipe.profile.offers.join("\n")}
-          onChange={(e) =>
-            setPipe({ profile: { ...pipe.profile, offers: e.target.value.split("\n") } })
-          }
-        />
-      </div>
-      <div className="dq-field">
-        <Label>{t.adGoal}</Label>
-        <Input
-          value={pipe.profile.advertising_goal}
-          onChange={(e) => setPipe({ profile: { ...pipe.profile, advertising_goal: e.target.value } })}
-        />
-      </div>
-      <div className="dq-field dq-field-top">
-        <Label>{t.notTarget}</Label>
-        <textarea
-          className="dq-json"
-          value={pipe.profile.boundaries.join("\n")}
-          onChange={(e) =>
-            setPipe({ profile: { ...pipe.profile, boundaries: e.target.value.split("\n") } })
-          }
-        />
+      <div className="grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-2">
+        <div className="dq-field">
+          <Label>{t.company}</Label>
+          <Input
+            value={pipe.profile.company}
+            onChange={(e) => setPipe({ profile: { ...pipe.profile, company: e.target.value } })}
+          />
+        </div>
+        <div className="dq-field">
+          <Label>{t.buyer}</Label>
+          <Input value={pipe.profile.buyer} onChange={(e) => setPipe({ profile: { ...pipe.profile, buyer: e.target.value } })} />
+        </div>
+        <div className="dq-field dq-field-top">
+          <Label>{t.geo}</Label>
+          <textarea
+            className="dq-json"
+            value={(pipe.profile.geo ?? []).join("\n")}
+            onChange={(e) =>
+              setPipe({ profile: { ...pipe.profile, geo: e.target.value.split("\n") } })
+            }
+          />
+        </div>
+        <div className="dq-field dq-field-top">
+          <Label>{t.targetSegments}</Label>
+          <textarea
+            className="dq-json"
+            value={(pipe.profile.target_segments ?? []).join("\n")}
+            onChange={(e) =>
+              setPipe({ profile: { ...pipe.profile, target_segments: e.target.value.split("\n") } })
+            }
+          />
+        </div>
+        <div className="dq-field dq-field-top">
+          <Label>{t.offers}</Label>
+          <textarea
+            className="dq-json"
+            value={pipe.profile.offers.join("\n")}
+            onChange={(e) =>
+              setPipe({ profile: { ...pipe.profile, offers: e.target.value.split("\n") } })
+            }
+          />
+        </div>
+        <div className="dq-field">
+          <Label>{t.adGoal}</Label>
+          <Input
+            value={pipe.profile.advertising_goal}
+            onChange={(e) => setPipe({ profile: { ...pipe.profile, advertising_goal: e.target.value } })}
+          />
+        </div>
+        <div className="dq-field dq-field-top">
+          <Label>{t.nonTargetDemand}</Label>
+          <textarea
+            className="dq-json"
+            value={(pipe.profile.non_target ?? []).join("\n")}
+            onChange={(e) =>
+              setPipe({ profile: { ...pipe.profile, non_target: e.target.value.split("\n") } })
+            }
+          />
+        </div>
+        <div className="dq-field dq-field-top">
+          <Label>{t.notTarget}</Label>
+          <textarea
+            className="dq-json"
+            value={pipe.profile.boundaries.join("\n")}
+            onChange={(e) =>
+              setPipe({ profile: { ...pipe.profile, boundaries: e.target.value.split("\n") } })
+            }
+          />
+        </div>
+        <div className="dq-field">
+          <Label>{t.brandPolicy}</Label>
+          <Input
+            value={pipe.profile.brand_policy ?? ""}
+            onChange={(e) => setPipe({ profile: { ...pipe.profile, brand_policy: e.target.value } })}
+          />
+        </div>
+        <div className="dq-field dq-field-top">
+          <Label>{t.targetExamples}</Label>
+          <textarea
+            className="dq-json"
+            value={(pipe.profile.target_examples ?? []).join("\n")}
+            onChange={(e) =>
+              setPipe({ profile: { ...pipe.profile, target_examples: e.target.value.split("\n") } })
+            }
+          />
+        </div>
+        <div className="dq-field dq-field-top">
+          <Label>{t.nonTargetExamples}</Label>
+          <textarea
+            className="dq-json"
+            value={(pipe.profile.non_target_examples ?? []).join("\n")}
+            onChange={(e) =>
+              setPipe({ profile: { ...pipe.profile, non_target_examples: e.target.value.split("\n") } })
+            }
+          />
+        </div>
+        <div className="dq-field dq-field-top">
+          <Label>{t.placementRules}</Label>
+          <textarea
+            className="dq-json"
+            value={(pipe.profile.placement_rules ?? []).join("\n")}
+            onChange={(e) =>
+              setPipe({ profile: { ...pipe.profile, placement_rules: e.target.value.split("\n") } })
+            }
+          />
+        </div>
       </div>
       <h3>{t.serpCheck}</h3>
       <div className="dq-field">
@@ -309,6 +386,7 @@ export function PipelineForm({
           className="dq-accent"
           onClick={() => {
             const compact = (rows: string[]) => rows.map((s) => s.trim()).filter((s) => s.length > 0);
+            const compactOpt = (rows?: string[]) => (rows === undefined ? undefined : compact(rows));
             const project: Project = {
               ...draft,
               pipeline: {
@@ -317,6 +395,12 @@ export function PipelineForm({
                   ...pipe.profile,
                   offers: compact(pipe.profile.offers),
                   boundaries: compact(pipe.profile.boundaries),
+                  geo: compactOpt(pipe.profile.geo),
+                  target_segments: compactOpt(pipe.profile.target_segments),
+                  non_target: compactOpt(pipe.profile.non_target),
+                  target_examples: compactOpt(pipe.profile.target_examples),
+                  non_target_examples: compactOpt(pipe.profile.non_target_examples),
+                  placement_rules: compactOpt(pipe.profile.placement_rules),
                 },
               },
             };
