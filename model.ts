@@ -34,8 +34,45 @@ export const siteProfileSchema = z.object({
   advertising_goal: z.string(),
   boundaries: z.array(z.string()),
   evidence: z.array(z.string()).optional(),
+  geo: z.array(z.string()).optional(),
+  target_segments: z.array(z.string()).optional(),
+  non_target: z.array(z.string()).optional(),
+  brand_policy: z.string().optional(),
+  target_examples: z.array(z.string()).optional(),
+  non_target_examples: z.array(z.string()).optional(),
+  placement_rules: z.array(z.string()).optional(),
+  updated_at: z.string().optional(),
 });
 export type SiteProfile = z.infer<typeof siteProfileSchema>;
+export type ProjectPassport = SiteProfile;
+
+const PASSPORT_JUDGED_FIELDS = [
+  "offers",
+  "advertising_goal",
+  "boundaries",
+  "target_segments",
+  "non_target",
+  "geo",
+  "target_examples",
+  "non_target_examples",
+] as const;
+
+export function passportCompleteness(profile: SiteProfile): {
+  filled: number;
+  total: number;
+  missing: string[];
+} {
+  const missing = PASSPORT_JUDGED_FIELDS.filter((field) => {
+    const value = profile[field];
+    if (Array.isArray(value)) return !value.some((item) => item.trim().length > 0);
+    return value === undefined || value.trim().length === 0;
+  });
+  return {
+    filled: PASSPORT_JUDGED_FIELDS.length - missing.length,
+    total: PASSPORT_JUDGED_FIELDS.length,
+    missing: [...missing],
+  };
+}
 
 export const pipelineSchema = z.object({
   accountId: z.string(),

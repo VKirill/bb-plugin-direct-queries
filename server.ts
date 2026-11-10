@@ -6,10 +6,13 @@ import { hostContract } from "./host.ts";
 import { createRunner, type StoredRun, type Store } from "./runner.ts";
 import {
   ledgerRowSchema,
+  passportCompleteness,
   projectSchema,
   settingsSchema,
+  siteProfileSchema,
   type LedgerRow,
   type Project,
+  type ProjectPassport,
   type Settings,
 } from "./model.ts";
 import { seedProjects, seedSettings } from "./seed.ts";
@@ -97,6 +100,17 @@ const ohmyseoAccountSchema = z.object({
   imported: z.boolean(),
 });
 
+const passportViewSchema = z.object({
+  passport: siteProfileSchema.nullable(),
+  completeness: z
+    .object({
+      filled: z.number(),
+      total: z.number(),
+      missing: z.array(z.string()),
+    })
+    .nullable(),
+});
+
 export const rpcContract = defineRpcContract({
   overview: {
     input: z.object({ days: z.number().int().min(1).max(90).default(7) }),
@@ -111,6 +125,14 @@ export const rpcContract = defineRpcContract({
       enabled: z.boolean(),
     }),
     output: z.boolean(),
+  },
+  passportGet: {
+    input: z.object({ projectId: z.string() }),
+    output: passportViewSchema,
+  },
+  passportSet: {
+    input: z.object({ projectId: z.string(), passport: siteProfileSchema }),
+    output: passportViewSchema,
   },
   "ledger.list": {
     input: z.object({
@@ -423,6 +445,37 @@ export default async function plugin(bb: BbPluginApi) {
     if ((await store.get("settings")) === undefined) await store.set("settings", seedSettings());
   };
 
+  const passportViewOf = (p: Project) => {
+    const profile = p.pipeline?.profile;
+    return profile
+      ? { passport: profile, completeness: passportCompleteness(profile) }
+      : { passport: null, completeness: null };
+  };
+
+  const passportViewFor = async (projectId: string) => {
+    await ensureSeed();
+    const p = (await projects()).find((x) => x.id === projectId);
+    if (!p) throw new Error("projectMissing");
+    return passportViewOf(p);
+  };
+
+  const savePassport = async (projectId: string, passport: ProjectPassport) => {
+    await ensureSeed();
+    const list = await projects();
+    const p = list.find((x) => x.id === projectId);
+    if (!p) throw new Error("projectMissing");
+    if (!p.pipeline) throw new Error("pipelineMissing");
+    p.pipeline.profile = siteProfileSchema.parse({
+      ...passport,
+      updated_at: new Date().toISOString(),
+    });
+    await saveProjects(list);
+    return passportViewOf(p);
+  };
+
+  const passportLine = (c: { filled: number; total: number; missing: string[] }): string =>
+    `passport ${c.filled}/${c.total} filled${c.missing.length ? ` (missing: ${c.missing.join(", ")})` : ""}`;
+
   const findRun = async (runId: string): Promise<StoredRun | undefined> => {
     for (const key of await store.list("run:")) {
       if (key.endsWith(`:${runId}`)) return store.get<StoredRun>(key);
@@ -516,7 +569,7 @@ export default async function plugin(bb: BbPluginApi) {
     { auth: "none" },
   );
 
-  const { ohmyseoAccounts, ohmyseoImport, ...mainRpcContract } = rpcContract;
+  const { ohmyseoAccounts, ohmyseoImport, passportGet, passportSet, ...mainRpcContract } = rpcContract;
 
   bb.rpc.register({ ohmyseoAccounts, ohmyseoImport }, {
     ohmyseoAccounts: async () => {
@@ -555,6 +608,11 @@ export default async function plugin(bb: BbPluginApi) {
       bb.realtime.publish("changed", { accounts: true });
       return { imported };
     },
+  });
+
+  bb.rpc.register({ passportGet, passportSet }, {
+    passportGet: ({ projectId }) => serial(() => passportViewFor(projectId)),
+    passportSet: ({ projectId, passport }) => serial(() => savePassport(projectId, passport)),
   });
 
   bb.rpc.register(mainRpcContract, {
@@ -769,11 +827,66 @@ export default async function plugin(bb: BbPluginApi) {
               stdout: JSON.stringify({ projects: await projects(), settings: await settings() }),
             };
           }
+          case "passport": {
+            const sub = argv[1];
+            const projectId = argv[2];
+            if (sub === "get") {
+              if (!projectId) {
+                return {
+                  exitCode: 1,
+                  stderr: "usage: bb direct-queries passport get <project> [--json]",
+                };
+              }
+              const view = await serial(() => passportViewFor(projectId));
+              if (argv.includes("--json")) {
+                return { exitCode: 0, stdout: JSON.stringify(view) };
+              }
+              if (!view.completeness) return { exitCode: 1, stderr: "passportMissing" };
+              return { exitCode: 0, stdout: passportLine(view.completeness) };
+            }
+            if (sub === "set") {
+              const fileAt = argv.indexOf("--file");
+              const file = fileAt === -1 ? undefined : argv[fileAt + 1];
+              if (!projectId || !file) {
+                return {
+                  exitCode: 1,
+                  stderr: "usage: bb direct-queries passport set <project> --file <path>",
+                };
+              }
+              const json: unknown = JSON.parse(await readFile(file, "utf8"));
+              let passport: ProjectPassport;
+              try {
+                passport = siteProfileSchema.parse(json);
+              } catch (e) {
+                if (e instanceof z.ZodError) {
+                  return {
+                    exitCode: 1,
+                    stderr: e.issues
+                      .map((i) => `${i.path.join(".")}: ${i.message}`)
+                      .join("\n"),
+                  };
+                }
+                throw e;
+              }
+              const view = await serial(() => savePassport(projectId, passport));
+              return {
+                exitCode: 0,
+                stdout: view.completeness
+                  ? `saved ${passportLine(view.completeness)}`
+                  : "saved",
+              };
+            }
+            return {
+              exitCode: 1,
+              stderr:
+                "usage: bb direct-queries passport get <project> [--json] | passport set <project> --file <path>",
+            };
+          }
           default:
             return {
               exitCode: 0,
               stdout:
-                "bb direct-queries status [--json] | run <project> <job> [--date D] | pipeline run <project> [--date D] [--dry-run] | enable|disable <project> [job] | morning [--dry-run|--send] | import <file> | export",
+                "bb direct-queries status [--json] | run <project> <job> [--date D] | pipeline run <project> [--date D] [--dry-run] | enable|disable <project> [job] | morning [--dry-run|--send] | import <file> | export | passport get <project> [--json] | passport set <project> --file <path>",
             };
         }
       } catch (e) {

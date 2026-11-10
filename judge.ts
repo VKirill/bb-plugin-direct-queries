@@ -22,6 +22,14 @@ export interface SiteProfile {
   advertising_goal: string;
   boundaries: string[];
   evidence?: string[];
+  geo?: string[];
+  target_segments?: string[];
+  non_target?: string[];
+  brand_policy?: string;
+  target_examples?: string[];
+  non_target_examples?: string[];
+  placement_rules?: string[];
+  updated_at?: string;
 }
 
 export type Feedback = { query: string; decision: "relevant" | "irrelevant" }[];
@@ -36,6 +44,24 @@ export interface ClientExample {
   decision: "Оставить" | "В минус";
   similarity: number;
 }
+
+interface StateItem {
+  campaign_name: string;
+  query: string;
+  client_examples: ClientExample[];
+  target_examples?: string[];
+  non_target_examples?: string[];
+}
+
+// Names the passport fields that are actually filled, so the judge weighs them.
+const passportHint = (profile: SiteProfile): string => {
+  const fields: string[] = [];
+  if (profile.target_segments?.length) fields.push("`profile.target_segments`");
+  if (profile.non_target?.length) fields.push("`profile.non_target`");
+  if (profile.geo?.length) fields.push("`profile.geo`");
+  if (profile.brand_policy) fields.push("`profile.brand_policy`");
+  return fields.length ? ` Учитывай также ${fields.join(", ")}.` : "";
+};
 
 export interface JudgeResult {
   query: string;
@@ -284,16 +310,22 @@ export function createJudge(args: {
     return JSON.parse(body).answers;
   };
 
-  const buildQuestions = (items: { campaign_name: string; query: string; client_examples: ClientExample[] }[]) => {
+  const buildQuestions = (items: StateItem[], passportNote: string) => {
     const questions: Record<string, unknown> = {};
     items.forEach((item, index) => {
       const ref = `items[${index}]`;
+      const passportExamples =
+        item.target_examples?.length || item.non_target_examples?.length
+          ? ` \`${ref}.target_examples\` и \`${ref}.non_target_examples\` — эталонные примеры целевого и нецелевого спроса.`
+          : "";
       questions[`relevance_${index}`] = {
         type: "score",
         instructions:
           `Соответствует ли запрос \`${ref}.query\` рекламной цели \`profile.company\` и кампании \`${ref}.campaign_name\`? ` +
-          `Учитывай \`profile.advertising_goal\`, \`profile.boundaries\` и прошлые решения клиента в \`${ref}.client_examples\`. ` +
-          "Близкий пример с тем же товаром, моделью и намерением — сильный сигнал; не переноси решение по одному общему слову " +
+          `Учитывай \`profile.advertising_goal\`, \`profile.boundaries\` и прошлые решения клиента в \`${ref}.client_examples\`.` +
+          passportNote +
+          passportExamples +
+          " Близкий пример с тем же товаром, моделью и намерением — сильный сигнал; не переноси решение по одному общему слову " +
           "и всегда учитывай текущую кампанию. Наличие товара в статье сайта или совпадение отдельных слов недостаточно. " +
           "Если смысл неясен, выбери средний уровень.",
         criteria: [
@@ -362,16 +394,21 @@ export function createJudge(args: {
       pending.push({ item, key, examples: similarFeedback(item.query, feedback) });
     }
 
+    const passportNote = passportHint(profile);
     for (let start = 0; start < pending.length; start += 10) {
       const batch = pending.slice(start, start + 10);
-      const stateItems = batch.map((b) => ({
+      const stateItems: StateItem[] = batch.map((b) => ({
         campaign_name: b.item.campaign,
         query: b.item.query,
         client_examples: b.examples,
+        ...(profile.target_examples?.length ? { target_examples: profile.target_examples } : {}),
+        ...(profile.non_target_examples?.length
+          ? { non_target_examples: profile.non_target_examples }
+          : {}),
       }));
       const answers = await ask({
         state: { profile, items: stateItems },
-        questions: buildQuestions(stateItems),
+        questions: buildQuestions(stateItems, passportNote),
       });
       for (let index = 0; index < batch.length; index++) {
         const result = readBatchResult(batch[index], index, answers);
@@ -440,7 +477,8 @@ export function createJudge(args: {
           type: "noul",
           instructions:
             "Соответствует ли потребность в `query` рекламной цели `profile.advertising_goal` и направлению `campaign`? " +
-            "Оцени конкретный товар или проект; одного совпадения терминов мало.",
+            "Оцени конкретный товар или проект; одного совпадения терминов мало." +
+            passportHint(profile),
         },
       },
     });
