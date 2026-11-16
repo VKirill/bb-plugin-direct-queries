@@ -50,6 +50,18 @@ export class DirectApiError extends Error {
   }
 }
 
+export class DirectItemRejected extends Error {
+  readonly id: number;
+  readonly details: string;
+
+  constructor(id: number, details: string) {
+    super(`Direct rejected ${id}: ${details}`);
+    this.name = "DirectItemRejected";
+    this.id = id;
+    this.details = details;
+  }
+}
+
 export interface DirectUnits {
   spent: number;
   rest: number;
@@ -124,6 +136,16 @@ function toError(body: unknown, status: number): DirectApiError {
     String(e.error_string ?? `direct api error ${status}`),
     typeof e.error_detail === "string" ? e.error_detail : undefined,
   );
+}
+
+function checkItems(results: unknown, ids: number[], label = ""): void {
+  if (!Array.isArray(results)) return;
+  results.forEach((raw, index) => {
+    const item = (raw ?? {}) as { Id?: number; Errors?: { Details?: string; Message?: string }[] };
+    if (item.Id !== undefined || !Array.isArray(item.Errors) || !item.Errors.length) return;
+    const details = item.Errors.map((e) => e?.Details || e?.Message).filter(Boolean).join("; ");
+    throw new DirectItemRejected(ids[index] ?? 0, `${label}${details}`);
+  });
 }
 
 function parseCell(cell: string): string | number | null {
@@ -336,6 +358,10 @@ export function createDirectClient(opts: DirectClientOptions) {
           NegativeKeywords: { Items: item.phrases },
         })),
       });
+      checkItems(
+        res.UpdateResults,
+        items.map((item) => item.id),
+      );
       return res.UpdateResults;
     },
 
@@ -372,6 +398,10 @@ export function createDirectClient(opts: DirectClientOptions) {
           NegativeKeywordSharedSetIds: item.sharedSetIds,
         })),
       });
+      checkItems(
+        res.UpdateResults,
+        items.map((item) => item.id),
+      );
       return res.UpdateResults;
     },
 
@@ -382,6 +412,10 @@ export function createDirectClient(opts: DirectClientOptions) {
           NegativeKeywords: { Items: item.phrases },
         })),
       });
+      checkItems(
+        res.UpdateResults,
+        items.map((item) => item.id),
+      );
       return res.UpdateResults;
     },
 
@@ -407,6 +441,7 @@ export function createDirectClient(opts: DirectClientOptions) {
       const res = await call<{ DeleteResults: unknown[] }>("keywords", "delete", {
         SelectionCriteria: { Ids: ids },
       });
+      checkItems(res.DeleteResults, ids);
       return res.DeleteResults;
     },
 
@@ -414,6 +449,10 @@ export function createDirectClient(opts: DirectClientOptions) {
       const res = await call<{ UpdateResults: unknown[] }>("keywords", "update", {
         Keywords: items.map((item) => ({ Id: item.id, Keyword: item.keyword })),
       });
+      checkItems(
+        res.UpdateResults,
+        items.map((item) => item.id),
+      );
       return res.UpdateResults;
     },
 
@@ -438,6 +477,7 @@ export function createDirectClient(opts: DirectClientOptions) {
       const res = await call<{ AddResults: { Id: number }[] }>("negativekeywordsharedsets", "add", {
         NegativeKeywordSharedSets: [{ Name: name, NegativeKeywords: negativeKeywords }],
       });
+      checkItems(res.AddResults, [0], `${name}: `);
       return res.AddResults[0].Id;
     },
 
@@ -445,6 +485,7 @@ export function createDirectClient(opts: DirectClientOptions) {
       const res = await call<{ UpdateResults: unknown[] }>("negativekeywordsharedsets", "update", {
         NegativeKeywordSharedSets: [{ Id: id, NegativeKeywords: negativeKeywords }],
       });
+      checkItems(res.UpdateResults, [id]);
       return res.UpdateResults;
     },
 
