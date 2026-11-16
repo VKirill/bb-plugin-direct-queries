@@ -1,4 +1,4 @@
-import type { AdGroup, Campaign, DirectClient, Keyword, SharedSet } from "./direct.ts";
+import { DirectItemRejected, type AdGroup, type Campaign, type DirectClient, type Keyword, type SharedSet } from "./direct.ts";
 import { directSafe, rulePhrase, words } from "./negatives.ts";
 
 export { directSafe };
@@ -6,6 +6,14 @@ export { directSafe };
 export const LIBRARY_CHAR_LIMIT = 4096;
 export const MAX_PARTS = 3;
 export const MAX_SETS_PER_GROUP = 3;
+
+export const WORD_ENDINGS = [
+  "", "а", "я", "ы", "и", "у", "ю", "е", "о", "ь",
+  "ов", "ев", "ей", "ам", "ям", "ами", "ями", "ах", "ях",
+  "ом", "ем", "ой", "ий", "ый", "ая", "яя", "ое", "ее",
+  "ые", "ие", "ого", "его", "ому", "ему", "ым", "им",
+  "ых", "их", "ыми", "ими", "ую", "юю",
+];
 
 export type LibraryDirect = Pick<
   DirectClient,
@@ -65,11 +73,18 @@ export interface LibraryPlan {
   campaigns: LibraryCampaignPlan[];
 }
 
+export interface LibrarySkippedCampaign {
+  campaignId: number;
+  details: string;
+  createdSetIds: number[];
+}
+
 export interface LibrarySyncResult {
   added: number;
   created: number;
   attached: number;
   deletedKeywords: ConflictingKeyword[];
+  skippedCampaigns?: LibrarySkippedCampaign[];
   errors: { campaignId: number; error: string }[];
 }
 
@@ -113,8 +128,12 @@ function commonPrefixLen(left: string, right: string): number {
 function sameWord(left: string, right: string): boolean {
   const a = foldYo(left);
   const b = foldYo(right);
-  const common = commonPrefixLen(a, b);
-  return common >= 3 && common >= Math.min(a.length, b.length) - 2 && Math.abs(a.length - b.length) <= 3;
+  if (a === b) return true;
+  const stem = commonPrefixLen(a, b);
+  for (let cut = 3; cut <= stem; cut++) {
+    if (WORD_ENDINGS.includes(a.slice(cut)) && WORD_ENDINGS.includes(b.slice(cut))) return true;
+  }
+  return false;
 }
 
 export function keywordConflicts(keyword: string, negatives: string[]): string[] {
@@ -318,17 +337,16 @@ export async function applyLibrarySync(
 ): Promise<LibrarySyncResult> {
   const result: LibrarySyncResult = { added: 0, created: 0, attached: 0, deletedKeywords: [], errors: [] };
   if (!opts.apply) return result;
+  const skippedCampaigns: LibrarySkippedCampaign[] = [];
   for (const campaign of plan.campaigns) {
+    const createdIds: number[] = [];
     try {
-      const createdIds: number[] = [];
       for (const item of campaign.creates) {
         createdIds.push(await direct.addSharedSet(item.name, item.phrases));
-        result.created += 1;
       }
       for (const item of campaign.updates) {
         await direct.updateSharedSet(item.id, item.phrases);
       }
-      result.added += campaign.additions.length;
       const libraryIds = [...campaign.existingSetIds, ...createdIds];
       if (campaign.attach.length) {
         await direct.updateAdGroupSharedSets(
@@ -337,15 +355,26 @@ export async function applyLibrarySync(
             sharedSetIds: mergeSetIds(group.keepSetIds, libraryIds),
           })),
         );
-        result.attached += campaign.attach.length;
       }
       if (campaign.deleteKeywords.length) {
         await direct.deleteKeywords(campaign.deleteKeywords.map((row) => row.Id));
-        result.deletedKeywords.push(...campaign.deleteKeywords);
       }
+      result.created += createdIds.length;
+      result.added += campaign.additions.length;
+      result.attached += campaign.attach.length;
+      result.deletedKeywords.push(...campaign.deleteKeywords);
     } catch (err) {
-      result.errors.push({ campaignId: campaign.campaignId, error: errorMessage(err) });
+      if (err instanceof DirectItemRejected) {
+        skippedCampaigns.push({
+          campaignId: campaign.campaignId,
+          details: err.details,
+          createdSetIds: createdIds,
+        });
+      } else {
+        result.errors.push({ campaignId: campaign.campaignId, error: errorMessage(err) });
+      }
     }
   }
+  result.skippedCampaigns = skippedCampaigns;
   return result;
 }

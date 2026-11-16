@@ -2,7 +2,7 @@
 // chose: campaign negatives, ad-group negatives or keyword minus-words.
 // The 'library' level stays on the shared-set path in library.ts.
 
-import type { AdGroup, Campaign, Keyword } from "./direct.ts";
+import { DirectItemRejected, type AdGroup, type Campaign, type Keyword } from "./direct.ts";
 import { covered, negativesIndex, phraseKey, phraseLength } from "./library.ts";
 import { directSafe, words } from "./negatives.ts";
 
@@ -56,6 +56,12 @@ export interface SkippedNegative {
   reason: string;
 }
 
+export interface SkippedCampaign {
+  campaignId: number;
+  details: string;
+  phrases: string[];
+}
+
 export interface NegativesError {
   target: string;
   error: string;
@@ -66,6 +72,7 @@ export interface NegativesPlan {
   groups: GroupNegativesPlan[];
   keywords: KeywordNegativesPlan[];
   skipped: SkippedNegative[];
+  skippedCampaigns?: SkippedCampaign[];
   errors: NegativesError[];
 }
 
@@ -320,13 +327,26 @@ function errorMessage(err: unknown): string {
 }
 
 async function writePlan(direct: NegativesDirect, plan: NegativesPlan): Promise<void> {
+  const rejected = new Set<number>();
   for (const campaign of plan.campaigns) {
     if (!campaign.added.length) continue;
     try {
       await direct.updateCampaignNegatives([{ id: campaign.campaignId, phrases: campaign.phrases }]);
     } catch (err) {
-      plan.errors.push({ target: `campaign ${campaign.campaignId}`, error: errorMessage(err) });
+      if (err instanceof DirectItemRejected) {
+        rejected.add(campaign.campaignId);
+        (plan.skippedCampaigns ??= []).push({
+          campaignId: campaign.campaignId,
+          details: err.details,
+          phrases: campaign.added,
+        });
+      } else {
+        plan.errors.push({ target: `campaign ${campaign.campaignId}`, error: errorMessage(err) });
+      }
     }
+  }
+  if (rejected.size) {
+    plan.campaigns = plan.campaigns.filter((campaign) => !rejected.has(campaign.campaignId));
   }
   const groups = plan.groups.filter((group) => group.added.length);
   if (groups.length) {
@@ -360,7 +380,14 @@ export async function applyNegatives(
     keywords: Keyword[];
   },
 ): Promise<NegativesResult> {
-  const plan: NegativesPlan = { campaigns: [], groups: [], keywords: [], skipped: [], errors: [] };
+  const plan: NegativesPlan = {
+    campaigns: [],
+    groups: [],
+    keywords: [],
+    skipped: [],
+    skippedCampaigns: [],
+    errors: [],
+  };
   const scope: NegativesInput = {
     approved: input.approved,
     campaigns: input.campaigns,
