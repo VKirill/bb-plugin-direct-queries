@@ -1,6 +1,9 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig, configDefaults } from "vitest/config";
 import { fileURLToPath } from "node:url";
 export default defineConfig({
   resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },
-  test: { environment: "jsdom" },
+  test: {
+    environment: "jsdom",
+    exclude: [...configDefaults.exclude, "tests/live/**"],
+  },
 });
