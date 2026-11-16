@@ -7,6 +7,7 @@ import {
 } from "../ohmyseo.ts";
 import { createDirectClient, DirectApiError } from "../direct.ts";
 import type { FetchFn, HttpResponse } from "../yandex-oauth.ts";
+import { parseReportRows } from "./live/helpers.ts";
 
 interface RecordedCall {
   url: string;
@@ -73,6 +74,15 @@ describe("ohmyDirectTransport", () => {
     expect(args.body).toEqual({ method: "update", params: { Campaigns: [{ Id: 1 }] } });
     expect(args.confirm).toBe(true);
     expect(args.acknowledge_live).toBe("UPDATE /json/v5/campaigns");
+    expect(args).toEqual({
+      endpoint: "/json/v5/campaigns",
+      method: "POST",
+      force_refresh: true,
+      body: { method: "update", params: { Campaigns: [{ Id: 1 }] } },
+      account: "label-1",
+      confirm: true,
+      acknowledge_live: "UPDATE /json/v5/campaigns",
+    });
   });
 
   it("a get call sends neither confirm nor acknowledge_live", async () => {
@@ -86,6 +96,13 @@ describe("ohmyDirectTransport", () => {
     expect(args.body).toEqual({ method: "get", params: { SelectionCriteria: {} } });
     expect(args).not.toHaveProperty("confirm");
     expect(args).not.toHaveProperty("acknowledge_live");
+    expect(args).toEqual({
+      endpoint: "/json/v5/campaigns",
+      method: "POST",
+      force_refresh: true,
+      body: { method: "get", params: { SelectionCriteria: {} } },
+      account: "label-1",
+    });
   });
 
   it("report sends /json/v5/reports with a body without method and returns tsv", async () => {
@@ -101,6 +118,69 @@ describe("ohmyDirectTransport", () => {
     const body = args.body as Record<string, unknown>;
     expect(body).not.toHaveProperty("method");
     expect(body.params).toEqual({ SelectionCriteria: {}, FieldNames: ["Date"] });
+    expect(args).toEqual({
+      endpoint: "/json/v5/reports",
+      method: "POST",
+      force_refresh: true,
+      body: { params: { SelectionCriteria: {}, FieldNames: ["Date"] } },
+      account: "label-1",
+    });
+  });
+
+  it("report throws DirectApiError 202 on a pending reply", async () => {
+    const { fetch } = fakeFetch([
+      mcpReply({
+        ok: false,
+        pending: true,
+        status: 202,
+        retry_after_ms: 10_000,
+        attempts: 1,
+        total_wait_ms: 8_570,
+      }),
+    ]);
+    const transport = transportFor(fetch);
+    const err = await transport.report({ SelectionCriteria: {} }).then(
+      () => {
+        throw new Error("should have thrown");
+      },
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(DirectApiError);
+    expect((err as DirectApiError).code).toBe(202);
+  });
+
+  it("report strips the title line and Total rows and converts micros to rubles", async () => {
+    const tsv =
+      '"direct-queries 2026-10-17_2026-11-15"\n' +
+      "Date\tCost\tClicks\tAvgCpc\n" +
+      "2026-10-17\t11724030000\t21\t558287142\n" +
+      "2026-10-18\t--\t0\t--\n" +
+      "Total rows: 2\n";
+    const { fetch } = fakeFetch([
+      mcpReply({ ok: true, status: 200, tsv, rows: 2 }),
+    ]);
+    const transport = transportFor(fetch);
+    const out = await transport.report({
+      SelectionCriteria: {},
+      FieldNames: ["Date", "Cost", "Clicks", "AvgCpc"],
+      ReportType: "CUSTOM_REPORT",
+    });
+    expect(out).toBe(
+      "Date\tCost\tClicks\tAvgCpc\n" +
+        "2026-10-17\t11724.03\t21\t558.29\n" +
+        "2026-10-18\t--\t0\t--",
+    );
+  });
+
+  it("a single-column money report normalizes and parses", async () => {
+    const tsv = "Cost\n11724030000";
+    const { fetch } = fakeFetch([
+      mcpReply({ ok: true, status: 200, tsv, rows: 1 }),
+    ]);
+    const transport = transportFor(fetch);
+    const out = await transport.report({ SelectionCriteria: {}, FieldNames: ["Cost"] });
+    expect(out).toBe("Cost\n11724.03");
+    expect(parseReportRows(out, ["Cost"])).toEqual([{ Cost: 11724.03 }]);
   });
 });
 
@@ -138,7 +218,14 @@ describe("createDirectClient with an OhMySEO transport", () => {
   it("searchQueryReport retries a pending report and parses the tsv", async () => {
     const sleeps: number[] = [];
     const { fetch } = fakeFetch([
-      mcpReply({ ok: true, status: 202, pending: true }),
+      mcpReply({
+        ok: false,
+        pending: true,
+        status: 202,
+        retry_after_ms: 10_000,
+        attempts: 1,
+        total_wait_ms: 8_570,
+      }),
       mcpReply({ ok: true, status: 200, tsv: "Date\tQuery\n2026-11-10\tx", rows: 1 }),
     ]);
     const client = createDirectClient({
@@ -152,6 +239,26 @@ describe("createDirectClient with an OhMySEO transport", () => {
     expect(sleeps).toEqual([10_000]);
     expect(rows).toHaveLength(1);
     expect(rows[0].Query).toBe("x");
+  });
+
+  it("searchQueryReport parses a gateway tsv with a title line and micros", async () => {
+    const tsv =
+      '"direct-queries 2026-11-10_2026-11-10"\n' +
+      "Date\tCost\tClicks\n" +
+      "2026-11-10\t11724030000\t21\n" +
+      "Total rows: 1\n";
+    const { fetch } = fakeFetch([
+      mcpReply({ ok: true, status: 200, tsv, rows: 1 }),
+    ]);
+    const client = createDirectClient({ transport: transportFor(fetch) });
+    const rows = await client.searchQueryReport({
+      dateFrom: "2026-11-10",
+      dateTo: "2026-11-10",
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].Date).toBe("2026-11-10");
+    expect(rows[0].Cost).toBe(11724.03);
+    expect(rows[0].Clicks).toBe(21);
   });
 });
 

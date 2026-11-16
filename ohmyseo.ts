@@ -72,19 +72,82 @@ function unwrap(payload: unknown): unknown {
   return holder.result ?? holder;
 }
 
+const REPORT_MONEY_FIELDS = new Set([
+  "Cost",
+  "AvgCpc",
+  "AvgCpm",
+  "AvgEffectiveBid",
+  "Revenue",
+  "CostPerConversion",
+]);
+
+const DIRECT_FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const isMoneyField = (name: string): boolean =>
+  REPORT_MONEY_FIELDS.has(name) ||
+  name.startsWith("CostPerConversion_") ||
+  name.startsWith("Revenue_");
+
+const microsToRubles = (cell: string): string => {
+  if (cell === "" || cell === "--") return cell;
+  const micros = Number(cell);
+  if (!Number.isFinite(micros)) return cell;
+  return String(Math.round(micros / 10_000) / 100);
+};
+
+function normalizeReportTsv(tsv: string, fields?: string[]): string {
+  const lines = tsv.split(/\r?\n/);
+  while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+  if (lines.length > 0 && lines[0].startsWith('"')) lines.shift();
+  while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+  while (lines.length > 0) {
+    const last = lines[lines.length - 1];
+    if (last.trim() !== "" && !last.startsWith("Total rows")) break;
+    lines.pop();
+  }
+  if (lines.length === 0) return "";
+  const header = lines[0].split("\t");
+  const isHeader =
+    (header.length > 1 || fields !== undefined) &&
+    header.every((cell) =>
+      fields === undefined ? DIRECT_FIELD_NAME.test(cell) : fields.includes(cell),
+    );
+  if (!isHeader) return lines.join("\n");
+  const moneyCols = header.flatMap((name, i) => (isMoneyField(name) ? [i] : []));
+  if (moneyCols.length === 0) return lines.join("\n");
+  const out = [lines[0]];
+  for (const line of lines.slice(1)) {
+    const cells = line.split("\t");
+    for (const i of moneyCols) {
+      if (i < cells.length) cells[i] = microsToRubles(cells[i]);
+    }
+    out.push(cells.join("\t"));
+  }
+  return out.join("\n");
+}
+
 function unwrapReport(payload: unknown): string {
   const env = asRecord(payload);
   if (!env) throw new DirectApiError(0, "ohmyseo report: bad reply");
+  if (env.pending === true || env.status === 202 || env.status === 201) {
+    throw new DirectApiError(202, "report pending");
+  }
   if (env.ok === false) {
     const inner = asRecord(env.data) ?? asRecord(env.body);
     throw directError(asRecord(inner)?.error ?? env.error);
   }
-  if (env.pending === true) throw new DirectApiError(202, "report pending");
   const inner = asRecord(env.data) ?? asRecord(env.body);
   const tsv = env.tsv ?? inner?.tsv ?? asRecord(inner?.result)?.tsv;
   if (typeof tsv === "string") return tsv;
   throw new DirectApiError(0, "ohmyseo report: no tsv in reply");
 }
+
+const reportFieldNames = (params: unknown): string[] | undefined => {
+  const list = asRecord(params)?.FieldNames;
+  if (!Array.isArray(list)) return undefined;
+  const names = list.filter((name): name is string => typeof name === "string");
+  return names.length > 0 ? names : undefined;
+};
 
 export function createOhmyClient(opts: { auth: string; fetch: FetchFn }): OhmyClient {
   let nextId = 0;
@@ -164,6 +227,8 @@ export function ohmyDirectTransport(opts: {
     async call(service, method, params) {
       const args: Record<string, unknown> = {
         endpoint: `/json/v5/${service}`,
+        method: "POST",
+        force_refresh: true,
         body: { method, params },
         ...baseArgs(),
       };
@@ -177,10 +242,13 @@ export function ohmyDirectTransport(opts: {
     async report(params) {
       const args: Record<string, unknown> = {
         endpoint: "/json/v5/reports",
+        method: "POST",
+        force_refresh: true,
         body: { params },
         ...baseArgs(),
       };
-      return unwrapReport(await opts.client.callTool(DIRECT_API_TOOL, args));
+      const tsv = unwrapReport(await opts.client.callTool(DIRECT_API_TOOL, args));
+      return normalizeReportTsv(tsv, reportFieldNames(params));
     },
   };
 }
