@@ -13,7 +13,7 @@ type Rpc = ReturnType<typeof useRpc<typeof rpcContract>>;
 type Strings = typeof en;
 
 const KEY_ROWS: Array<{ name: SecretName; label: keyof Strings }> = [
-  { name: "openluxKey", label: "keyOpenlux" },
+  { name: "decisionKey", label: "keyDecision" },
   { name: "typesafeKey", label: "keyTypesafe" },
   { name: "xmlstockUser", label: "keyXmlstockUser" },
   { name: "xmlstockKey", label: "keyXmlstockKey" },

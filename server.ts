@@ -283,7 +283,7 @@ function liveDeps(
     },
     judgeQueries: async (profile, items, feedback) => {
       const judge = createJudge({
-        openluxKey: await secrets.get("openluxKey"),
+        decisionKey: await secrets.get("decisionKey"),
         typesafeKey: await secrets.get("typesafeKey").catch(() => undefined),
         fetch: fetchFn,
         sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -309,7 +309,7 @@ function liveDeps(
         now,
         budget: 25,
         judge: createJudge({
-          openluxKey: await secrets.get("openluxKey"),
+          decisionKey: await secrets.get("decisionKey"),
           typesafeKey: await secrets.get("typesafeKey").catch(() => undefined),
           fetch: fetchFn,
           sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -325,7 +325,7 @@ function liveDeps(
     },
     suggestNegatives: async (queries) => {
       const judge = createJudge({
-        openluxKey: await secrets.get("openluxKey"),
+        decisionKey: await secrets.get("decisionKey"),
         typesafeKey: await secrets.get("typesafeKey").catch(() => undefined),
         fetch: fetchFn,
         sleep: (ms) => new Promise((r) => setTimeout(r, ms)),

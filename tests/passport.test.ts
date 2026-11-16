@@ -146,7 +146,7 @@ describe("judge passport fields", () => {
       return { status: 200, text: async () => JEV_ANSWERS };
     };
     const judge = createJudge({
-      openluxKey: "k",
+      decisionKey: "k",
       fetch,
       sleep: async () => {},
       now: () => 0,

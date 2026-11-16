@@ -32,6 +32,12 @@ describe("CATALOG_NAMES for Yandex OAuth", () => {
   });
 });
 
+describe("CATALOG_NAMES for the judge", () => {
+  it("maps decisionKey to GEMINI_API_KEY_AISTUDIO", () => {
+    expect(CATALOG_NAMES.decisionKey).toBe("GEMINI_API_KEY_AISTUDIO");
+  });
+});
+
 describe("createSecrets Yandex client id fallback", () => {
   it("asks env-catalog for DIRECT_QUERIES_YANDEX_CLIENT_ID when the plugin setting is empty", async () => {
     const { bb, calls } = fakeBb("x");
