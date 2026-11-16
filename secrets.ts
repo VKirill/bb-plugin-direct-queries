@@ -4,7 +4,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 export const SECRET_NAMES = [
   "yandexClientId",
   "yandexClientSecret",
-  "openluxKey",
+  "decisionKey",
   "typesafeKey",
   "xmlstockUser",
   "xmlstockKey",
@@ -19,7 +19,7 @@ export type SecretName = (typeof SECRET_NAMES)[number];
 export const CATALOG_NAMES: Record<SecretName, string> = {
   yandexClientId: "DIRECT_QUERIES_YANDEX_CLIENT_ID",
   yandexClientSecret: "DIRECT_QUERIES_YANDEX_CLIENT_SECRET",
-  openluxKey: "OPENLUX_API_KEY",
+  decisionKey: "GEMINI_API_KEY_AISTUDIO",
   typesafeKey: "TYPESAFE_API_KEY",
   xmlstockUser: "XMLSTOCK_USER",
   xmlstockKey: "XMLSTOCK_KEY",
@@ -55,7 +55,7 @@ export function createSecrets(bb: Pick<BbPluginApi, "settings" | "sdk">): Secret
   const handle = bb.settings.define({
     yandexClientId: { type: "string", label: "Yandex OAuth client id", secret: true },
     yandexClientSecret: { type: "string", label: "Yandex OAuth client secret", secret: true },
-    openluxKey: { type: "string", label: "OpenLux API key", secret: true },
+    decisionKey: { type: "string", label: "Google Decision API key", secret: true },
     typesafeKey: { type: "string", label: "TypeSafe API key", secret: true },
     xmlstockUser: { type: "string", label: "XMLStock user", secret: true },
     xmlstockKey: { type: "string", label: "XMLStock key", secret: true },

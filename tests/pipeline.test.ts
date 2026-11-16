@@ -147,18 +147,18 @@ describe("runPipeline", () => {
     expect(calls.libraryApply).toEqual([false]);
   });
 
-  it("a missing Jev key fails the audit stage naming the setting and OPENLUX_API_KEY", async () => {
+  it("a missing Jev key fails the audit stage naming the setting and GEMINI_API_KEY_AISTUDIO", async () => {
     const { deps, calls } = fakes({
       getSecret: async (name) => {
-        if (name === "openluxKey") throw new MissingSecret("openluxKey");
+        if (name === "decisionKey") throw new MissingSecret("decisionKey");
         return "secret";
       },
     });
     const rows = await runPipeline(deps, project, "2026-11-03", { trigger: "schedule" });
     const audit = rows.find((r) => r.stageId === "audit")!;
     expect(audit.status).toBe("failed");
-    expect(audit.firstError).toContain("openluxKey");
-    expect(audit.firstError).toContain("OPENLUX_API_KEY");
+    expect(audit.firstError).toContain("decisionKey");
+    expect(audit.firstError).toContain("GEMINI_API_KEY_AISTUDIO");
     expect(audit.firstError).not.toMatch(/sk-|secret-value|api[_-]?key\s*[:=]\s*\S+/i);
     expect(calls.publish).toBe(0);
   });
@@ -173,7 +173,7 @@ describe("runPipeline", () => {
         status: "релевантен",
         score: 80,
         reason: "cached",
-        judge: "openlux",
+        judge: "gemini",
         judgedAt: 1,
       },
     ];

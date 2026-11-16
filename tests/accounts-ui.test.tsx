@@ -37,7 +37,7 @@ beforeEach(() => {
   routes["accounts.list"] = async () => [];
   routes["oauth.redirectUri"] = async () => ({ uri: REDIRECT });
   routes["secrets.status"] = async () => ({
-    openluxKey: false,
+    decisionKey: false,
     typesafeKey: true,
     xmlstockUser: true,
     xmlstockKey: true,
@@ -120,7 +120,7 @@ describe("settings keys", () => {
   it("a missing key shows the missing pill", async () => {
     await openTab("Settings");
     expect(await screen.findByText("missing")).toBeTruthy();
-    expect(screen.getByText("Jev OpenLux")).toBeTruthy();
+    expect(screen.getByText("Google Decision API key")).toBeTruthy();
   });
 
   it("Russian locale uses translated status pills", () => {

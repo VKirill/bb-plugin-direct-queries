@@ -1,6 +1,6 @@
-// Jev (System One) relevance judge for search queries against a site profile.
-// Port of the OpenLux→TypeSafe judge from the reference direct-query audit:
-// same payload shape, batch size, retry waits, deadline fallback and feedback memory.
+// Query relevance judge on Google gemini-decision-1 with a TypeSafe Jev
+// fallback, ported from the reference direct-query audit: same questions,
+// batch size, retry waits, deadline fallback and feedback memory.
 
 export type FetchLike = (
   url: string,
@@ -63,6 +63,8 @@ const passportHint = (profile: SiteProfile): string => {
   return fields.length ? ` Учитывай также ${fields.join(", ")}.` : "";
 };
 
+export type JudgeBackend = "gemini" | "typesafe";
+
 export interface JudgeResult {
   query: string;
   campaign: string;
@@ -72,6 +74,7 @@ export interface JudgeResult {
   intent: string;
   confidence: number | null;
   decisionSource: "jev" | "jev_with_feedback" | "client_analogy" | "user_feedback";
+  backend?: JudgeBackend;
 }
 
 export type JevAnswer = Record<string, any>;
@@ -82,8 +85,8 @@ export interface JevRequest {
 }
 export type JevAsk = (req: JevRequest) => Promise<JevAnswers>;
 
-export const OPENLUX_URL = "https://api.openlux.ai/v1/systemone";
-export const JEV_MODEL = "jev-1.13.0:stable";
+export const DECISION_URL = "https://generativelanguage.googleapis.com/v1beta/decisions";
+export const DECISION_MODEL = "gemini-decision-1";
 export const TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone";
 export const TYPESAFE_MODEL = "jev-1.13.0";
 const JEV_WAITS_S = [30, 60, 120, 240, 300];
@@ -93,6 +96,13 @@ export class JevUnavailable extends Error {
   constructor(message = "Jev unavailable") {
     super(message);
     this.name = "JevUnavailable";
+  }
+}
+
+export class JevRejected extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "JevRejected";
   }
 }
 
@@ -207,16 +217,17 @@ const normQuery = (text: string): string => text.toLowerCase().trim();
 const round3 = (v: number): number => Math.round(v * 1000) / 1000;
 
 export function createJudge(args: {
-  openluxKey: string;
+  decisionKey: string;
   typesafeKey?: string;
   fetch: FetchLike;
   sleep: SleepFn;
   now: () => number;
   cache: CachePort;
-  openluxDeadline?: number;
+  decisionDeadline?: number;
 }) {
-  const { openluxKey, typesafeKey, fetch, sleep, now, cache, openluxDeadline } = args;
-  let openluxGivenUp = false;
+  const { decisionKey, typesafeKey, fetch, sleep, now, cache, decisionDeadline } = args;
+  let decisionGivenUp = false;
+  let lastBackend: JudgeBackend | undefined;
 
   const post = async (
     url: string,
@@ -246,14 +257,15 @@ export function createJudge(args: {
         continue;
       }
       if (status === 200) return body;
-      if (!retryable(status) || wait === null)
-        throw new Error(`Jev HTTP ${status}: ${body.slice(0, limit)}`);
+      if (!retryable(status))
+        throw new JevRejected(`Jev HTTP ${status}: ${body.slice(0, limit)}`);
+      if (wait === null) throw new Error(`Jev HTTP ${status}: ${body.slice(0, limit)}`);
       await sleep(wait * 1000);
     }
     throw new Error("unreachable");
   };
 
-  const openluxUntil = async (
+  const decisionUntil = async (
     payload: Record<string, unknown>,
     headers: Record<string, string>,
     limit: number,
@@ -263,14 +275,14 @@ export function createJudge(args: {
       let status: number | undefined;
       let body = "";
       try {
-        ({ status, body } = await post(OPENLUX_URL, payload, headers));
+        ({ status, body } = await post(DECISION_URL, payload, headers));
       } catch {
         // dropped connection or timeout: keep asking until the deadline
       }
       if (status === 200) return body;
       if (status !== undefined && !retryable(status))
-        throw new Error(`Jev HTTP ${status}: ${body.slice(0, limit)}`);
-      const leftMs = (openluxDeadline as number) - now();
+        throw new JevRejected(`Jev HTTP ${status}: ${body.slice(0, limit)}`);
+      const leftMs = (decisionDeadline as number) - now();
       if (leftMs <= 0) throw new JevUnavailable();
       const waitS = waits.next().value ?? NIGHT_WAIT_CAP_S;
       await sleep(Math.min(waitS * 1000, NIGHT_WAIT_CAP_S * 1000, leftMs));
@@ -278,35 +290,55 @@ export function createJudge(args: {
   };
 
   const jevPost = async (
-    payload: Record<string, unknown>,
-    headers: Record<string, string>,
+    state: Record<string, unknown>,
+    questions: Record<string, unknown>,
     limit = 300,
-  ): Promise<string> => {
-    if (openluxDeadline === undefined) return attempts(OPENLUX_URL, payload, headers, limit);
-    if (!openluxGivenUp) {
-      try {
-        return await openluxUntil(payload, headers, limit);
-      } catch (e) {
-        if (!(e instanceof JevUnavailable)) throw e;
-        openluxGivenUp = true;
-      }
+  ): Promise<{ body: string; backend: JudgeBackend }> => {
+    const typesafe = async (): Promise<{ body: string; backend: JudgeBackend }> => {
+      const body = await attempts(
+        TYPESAFE_URL,
+        { model: TYPESAFE_MODEL, state, questions },
+        { Authorization: `Bearer ${typesafeKey}`, "Content-Type": "application/json" },
+        limit,
+      );
+      return { body, backend: "typesafe" };
+    };
+    const pastDeadline = decisionDeadline !== undefined && now() >= decisionDeadline;
+    if (decisionGivenUp || pastDeadline) {
+      decisionGivenUp = true;
+      if (!typesafeKey) throw new JevUnavailable("Decision deadline passed and no TypeSafe key");
+      return typesafe();
     }
-    if (!typesafeKey) throw new JevUnavailable("OpenLux deadline passed and no TypeSafe key");
-    return attempts(
-      TYPESAFE_URL,
-      { ...payload, model: TYPESAFE_MODEL },
-      { ...headers, Authorization: `Bearer ${typesafeKey}` },
-      limit,
-    );
+    const payload = {
+      model: DECISION_MODEL,
+      input: JSON.stringify(state),
+      questions,
+    };
+    const headers = {
+      "x-goog-api-key": decisionKey,
+      "Content-Type": "application/json",
+    };
+    try {
+      const body =
+        decisionDeadline === undefined
+          ? await attempts(DECISION_URL, payload, headers, limit)
+          : await decisionUntil(payload, headers, limit);
+      return { body, backend: "gemini" };
+    } catch (e) {
+      if (!(e instanceof JevRejected) && !(e instanceof JevUnavailable)) throw e;
+      decisionGivenUp = true;
+      if (!typesafeKey) {
+        throw e instanceof JevUnavailable
+          ? new JevUnavailable("Decision deadline passed and no TypeSafe key")
+          : e;
+      }
+      return typesafe();
+    }
   };
 
-  const openluxHeaders = (): Record<string, string> => ({
-    Authorization: `Bearer ${openluxKey}`,
-    "Content-Type": "application/json",
-  });
-
   const ask: JevAsk = async (req) => {
-    const body = await jevPost({ model: JEV_MODEL, state: req.state, questions: req.questions }, openluxHeaders());
+    const { body, backend } = await jevPost(req.state, req.questions);
+    lastBackend = backend;
     return JSON.parse(body).answers;
   };
 
@@ -386,7 +418,7 @@ export function createJudge(args: {
         });
         continue;
       }
-      const cached = await cache.get<JudgeResult>(`judge\t${key}`);
+      const cached = await cache.get<JudgeResult>(`judge2\t${key}`);
       if (cached !== undefined) {
         byKey.set(key, cached);
         continue;
@@ -412,8 +444,9 @@ export function createJudge(args: {
       });
       for (let index = 0; index < batch.length; index++) {
         const result = readBatchResult(batch[index], index, answers);
+        result.backend = lastBackend;
         byKey.set(batch[index].key, result);
-        await cache.set(`judge\t${batch[index].key}`, result);
+        await cache.set(`judge2\t${batch[index].key}`, result);
       }
     }
 
@@ -485,7 +518,7 @@ export function createJudge(args: {
     return { pageFit: Number(answers.page_fit.noul), adFit: Number(answers.ad_fit.noul) };
   };
 
-  return { judgeQueries, judgeSnippet, ask };
+  return { judgeQueries, judgeSnippet, ask, lastBackend: () => lastBackend };
 }
 
 export type Judge = ReturnType<typeof createJudge>;

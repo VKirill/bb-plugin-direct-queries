@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  JEV_MODEL,
-  OPENLUX_URL,
+  DECISION_MODEL,
+  DECISION_URL,
   TYPESAFE_MODEL,
   TYPESAFE_URL,
   createJudge,
@@ -55,7 +55,7 @@ const JEV_BODY = JSON.stringify({
 });
 
 const judge = (fetch: any, sleep: SleepFn = async () => {}, now = () => 0, cache = memoryCache(), extra: object = {}) =>
-  createJudge({ openluxKey: "openlux-key", fetch, sleep, now, cache, ...extra });
+  createJudge({ decisionKey: "decision-key", fetch, sleep, now, cache, ...extra });
 
 describe("judgeQueries", () => {
   it("builds the Jev payload with state.profile, state.items and questions as in the reference", async () => {
@@ -68,12 +68,14 @@ describe("judgeQueries", () => {
     );
     expect(calls).toHaveLength(1);
     const { url, init } = calls[0];
-    expect(url).toBe(OPENLUX_URL);
-    expect(init?.headers?.Authorization).toBe("Bearer openlux-key");
+    expect(url).toBe(DECISION_URL);
+    expect(init?.headers?.["x-goog-api-key"]).toBe("decision-key");
+    expect(init?.headers?.Authorization).toBeUndefined();
     const payload = JSON.parse(init!.body!);
-    expect(payload.model).toBe(JEV_MODEL);
-    expect(payload.state.profile).toEqual(PROFILE);
-    expect(payload.state.items).toEqual([
+    expect(payload.model).toBe(DECISION_MODEL);
+    const state = JSON.parse(payload.input);
+    expect(state.profile).toEqual(PROFILE);
+    expect(state.items).toEqual([
       {
         campaign_name: "Фильтры [Поиск]",
         query: "промышленный фильтр цех",
@@ -158,7 +160,7 @@ describe("judgeQueries", () => {
 });
 
 describe("Jev retries", () => {
-  it("503 twice then 200 keeps OpenLux and waits 30s, 60s", async () => {
+  it("503 twice then 200 keeps the Decision API and waits 30s, 60s", async () => {
     let n = 0;
     const sleeps: number[] = [];
     const fetch = fetchOf(() => (++n <= 2 ? { status: 503, body: "bad gateway" } : { status: 200, body: JEV_BODY }));
@@ -166,7 +168,7 @@ describe("Jev retries", () => {
     await j.judgeQueries(PROFILE, [{ campaign: "К", query: "q" }], []);
     expect(n).toBe(3);
     expect(sleeps).toEqual([30000, 60000]);
-    expect(new Set(calls.map((c) => c.url))).toEqual(new Set([OPENLUX_URL]));
+    expect(new Set(calls.map((c) => c.url))).toEqual(new Set([DECISION_URL]));
   });
 
   it("a non-retryable status raises at once", async () => {
@@ -179,7 +181,7 @@ describe("Jev retries", () => {
   });
 });
 
-describe("OpenLux deadline", () => {
+describe("Decision deadline", () => {
   it("past the deadline the request goes to api.typesafe.ai with model jev-1.13.0", async () => {
     let now = 1_000_000;
     const deadline = now + 3 * 3600 * 1000;
@@ -195,7 +197,7 @@ describe("OpenLux deadline", () => {
       },
       () => now,
       memoryCache(),
-      { typesafeKey: "ts-key", openluxDeadline: deadline },
+      { typesafeKey: "ts-key", decisionDeadline: deadline },
     );
     await j.judgeQueries(PROFILE, [{ campaign: "К", query: "q" }], []);
     expect(now).toBeGreaterThanOrEqual(deadline);
@@ -203,7 +205,7 @@ describe("OpenLux deadline", () => {
     expect(last.url).toBe(TYPESAFE_URL);
     expect(JSON.parse(last.init!.body!).model).toBe(TYPESAFE_MODEL);
     expect(last.init?.headers?.Authorization).toBe("Bearer ts-key");
-    // and the next call of the same judge goes to TypeSafe at once, without touching OpenLux
+    // and the next call of the same judge goes to TypeSafe at once, without touching Google
     calls.length = 0;
     await j.judgeQueries(PROFILE, [{ campaign: "К", query: "q2" }], []);
     expect(calls).toHaveLength(1);

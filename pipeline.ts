@@ -318,7 +318,7 @@ export async function runPipeline(
     queries.every((q) => byKey.has(`${q.campaignId}\t${normQuery(q.query)}`));
 
   const auditResult = await runStage("audit", true, async () => {
-    await deps.getSecret("openluxKey");
+    await deps.getSecret("decisionKey");
     if (allCached) {
       judgements = queries.map((q) => {
         const j = byKey.get(`${q.campaignId}\t${normQuery(q.query)}`)!;
@@ -344,7 +344,7 @@ export async function runPipeline(
         status: j.status,
         score: j.score,
         reason: j.reason,
-        judge: j.decisionSource.startsWith("jev") ? "openlux" : j.decisionSource,
+        judge: j.decisionSource.startsWith("jev") ? (j.backend ?? "gemini") : j.decisionSource,
         judgedAt: deps.now(),
       })),
     );
@@ -352,7 +352,7 @@ export async function runPipeline(
       rowsIn: auditItems.length,
       rowsOut: judgements.length,
       paid: { jev: auditItems.length },
-      judge: "openlux",
+      judge: judgements.some((j) => j.backend === "typesafe") ? "typesafe" : "gemini",
     };
   });
   if (auditResult === "failed") return rows;
