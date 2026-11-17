@@ -28,6 +28,7 @@ const REPORT_FIELDS = [
   "Query",
   "CriterionType",
   "Criterion",
+  "CriterionId",
   "MatchType",
   "TargetingCategory",
   "Impressions",
@@ -605,14 +606,53 @@ export function createDirectClient(opts: DirectClientOptions) {
       return res.UpdateResults;
     },
 
-    async keywordBids(campaignIds: number[]): Promise<KeywordBid[]> {
+    async addKeywords(
+      items: { adGroupId: number; keyword: string; bid?: number }[],
+    ): Promise<{
+      added: { index: number; id: number }[];
+      rejected: { index: number; details: string }[];
+    }> {
+      const added: { index: number; id: number }[] = [];
+      const rejected: { index: number; details: string }[] = [];
+      for (let i = 0; i < items.length; i += IDS_BATCH) {
+        const batch = items.slice(i, i + IDS_BATCH);
+        const res = await call<{ AddResults?: unknown[] }>("keywords", "add", {
+          Keywords: batch.map((item) => ({
+            AdGroupId: item.adGroupId,
+            Keyword: item.keyword,
+            ...(item.bid !== undefined ? { Bid: item.bid } : {}),
+          })),
+        });
+        if (!Array.isArray(res.AddResults)) {
+          throw new DirectApiError(0, "keywords.add: no AddResults");
+        }
+        batch.forEach((_, j) => {
+          const result = (res.AddResults![j] ?? {}) as {
+            Id?: number;
+            Errors?: { Details?: string; Message?: string }[];
+          };
+          const errors = Array.isArray(result.Errors) ? result.Errors : [];
+          if (errors.length) {
+            const details = errors
+              .map((e) => e?.Details || e?.Message)
+              .filter(Boolean)
+              .join("; ");
+            rejected.push({ index: i + j, details });
+          } else {
+            added.push({ index: i + j, id: result.Id ?? 0 });
+          }
+        });
+      }
+      return { added, rejected };
+    },
+
+    async keywordBids(target: number[] | { keywordIds: number[] }): Promise<KeywordBid[]> {
       const out: KeywordBid[] = [];
-      for (let i = 0; i < campaignIds.length; i += CRITERIA_BATCH) {
-        const batch = campaignIds.slice(i, i + CRITERIA_BATCH);
+      const fetchBids = async (criteria: Record<string, unknown>): Promise<void> => {
         for await (const item of paged(
           "keywordbids",
           {
-            SelectionCriteria: { CampaignIds: batch, ServingStatuses: ["ELIGIBLE"] },
+            SelectionCriteria: criteria,
             FieldNames: ["KeywordId", "CampaignId", "AdGroupId", "ServingStatus"],
             SearchFieldNames: ["Bid", "AuctionBids"],
           },
@@ -620,6 +660,16 @@ export function createDirectClient(opts: DirectClientOptions) {
         )) {
           out.push(item as unknown as KeywordBid);
         }
+      };
+      if (Array.isArray(target)) {
+        for (let i = 0; i < target.length; i += CRITERIA_BATCH) {
+          const batch = target.slice(i, i + CRITERIA_BATCH);
+          await fetchBids({ CampaignIds: batch, ServingStatuses: ["ELIGIBLE"] });
+        }
+        return out;
+      }
+      for (let i = 0; i < target.keywordIds.length; i += PAGE_LIMIT) {
+        await fetchBids({ KeywordIds: target.keywordIds.slice(i, i + PAGE_LIMIT) });
       }
       return out;
     },

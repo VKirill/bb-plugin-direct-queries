@@ -36,6 +36,19 @@ describe("i18n", () => {
     );
   });
 
+  it("names the keyword growth controls in both locales", () => {
+    expect(en.growthTitle).toBe("New keywords");
+    expect(ru.growthTitle).toBe("Новые фразы");
+    expect(en.growthEnable).toBe(
+      "Turn kept queries with enough impressions into keywords at 06:20 MSK",
+    );
+    expect(ru.growthEnable).toBe(
+      "Добавлять одобренные запросы с достаточным числом показов как фразы в 06:20 МСК",
+    );
+    expect(en.growthApply).toBe("Add keywords in Direct");
+    expect(ru.growthApply).toBe("Добавлять фразы в Директ");
+  });
+
   it("detects ru from document lang", () => {
     document.documentElement.lang = "ru";
     expect(detectLocale()).toBe("ru");

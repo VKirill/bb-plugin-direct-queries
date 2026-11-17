@@ -630,12 +630,84 @@ describe("keywordbids", () => {
     expect(result.rejected).toEqual([{ keywordId: 6, details: "bad bid" }]);
   });
 
+  it("keywordBids by keywordIds posts KeywordIds without the serving-status filter", async () => {
+    const { fetch, calls } = fakeFetch([
+      ok({
+        KeywordBids: [
+          { KeywordId: 5, CampaignId: 11, AdGroupId: 3, Search: { Bid: 1_500_000 } },
+          { KeywordId: 6, CampaignId: 11, AdGroupId: 3, Search: { Bid: 2_000_000 } },
+        ],
+      }),
+    ]);
+    const client = createDirectClient({ token: "t", fetch });
+    const rows = await client.keywordBids({ keywordIds: [5, 6] });
+    expect(rows.map((r) => r.KeywordId)).toEqual([5, 6]);
+    expect(rows[0].Search?.Bid).toBe(1_500_000);
+    expect(rows[1].Search?.Bid).toBe(2_000_000);
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(calls[0].init?.body ?? "{}");
+    expect(body).toEqual({
+      method: "get",
+      params: {
+        SelectionCriteria: { KeywordIds: [5, 6] },
+        FieldNames: ["KeywordId", "CampaignId", "AdGroupId", "ServingStatus"],
+        SearchFieldNames: ["Bid", "AuctionBids"],
+        Page: { Limit: 10000 },
+      },
+    });
+  });
+
   it("setKeywordBids throws when SetResults is missing", async () => {
     const { fetch } = fakeFetch([ok({})]);
     const client = createDirectClient({ token: "t", fetch });
     await expect(
       client.setKeywordBids([{ keywordId: 1, searchBid: 1_000_000 }]),
     ).rejects.toThrow("no SetResults");
+  });
+});
+
+describe("addKeywords", () => {
+  it("posts Keywords.add and splits added from rejected", async () => {
+    const { fetch, calls } = fakeFetch([
+      ok({
+        AddResults: [
+          { Id: 42 },
+          { Errors: [{ Details: "bad keyword" }] },
+          { Id: 43, Warnings: [{ Message: "w" }] },
+        ],
+      }),
+    ]);
+    const client = createDirectClient({ token: "t", fetch });
+    const result = await client.addKeywords([
+      { adGroupId: 7, keyword: "купить фильтр", bid: 5_000_000 },
+      { adGroupId: 7, keyword: "плохая фраза" },
+      { adGroupId: 8, keyword: "ещё фраза", bid: 1_000_000 },
+    ]);
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(calls[0].init?.body ?? "{}");
+    expect(body).toEqual({
+      method: "add",
+      params: {
+        Keywords: [
+          { AdGroupId: 7, Keyword: "купить фильтр", Bid: 5_000_000 },
+          { AdGroupId: 7, Keyword: "плохая фраза" },
+          { AdGroupId: 8, Keyword: "ещё фраза", Bid: 1_000_000 },
+        ],
+      },
+    });
+    expect(result.added).toEqual([
+      { index: 0, id: 42 },
+      { index: 2, id: 43 },
+    ]);
+    expect(result.rejected).toEqual([{ index: 1, details: "bad keyword" }]);
+  });
+
+  it("throws when AddResults is missing", async () => {
+    const { fetch } = fakeFetch([ok({})]);
+    const client = createDirectClient({ token: "t", fetch });
+    await expect(
+      client.addKeywords([{ adGroupId: 7, keyword: "фраза" }]),
+    ).rejects.toThrow("no AddResults");
   });
 });
 

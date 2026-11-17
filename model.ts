@@ -154,6 +154,14 @@ export const pipelineSchema = z
         skipCampaigns: z.array(z.string()).default(["По минималке"]),
       })
       .optional(),
+    keywordGrowth: z
+      .object({
+        enabled: z.boolean().default(false),
+        apply: z.boolean().default(false),
+        minImpressions: z.number().int().default(10),
+        days: z.number().int().default(5),
+      })
+      .optional(),
   })
   .transform((pipe) => ({
     ...pipe,
@@ -285,6 +293,21 @@ export function pipelineJobs(pipeline: ProjectPipeline): Job[] {
       reportDay: "today",
       prelude: "",
       stages: [stage("bids", "Ставки", true)],
+      catchUpHours: [],
+      timeoutMin: 60,
+      enabled: true,
+    });
+  }
+  if (pipeline.keywordGrowth?.enabled) {
+    jobs.push({
+      id: "keyword-growth",
+      title: "Новые фразы",
+      hours: [6],
+      minute: 20,
+      weekdays: ALL_DAYS,
+      reportDay: "today",
+      prelude: "",
+      stages: [stage("keyword-growth", "Новые фразы", true)],
       catchUpHours: [],
       timeoutMin: 60,
       enabled: true,

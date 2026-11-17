@@ -44,6 +44,7 @@ import { listChanges, syncDirectChanges, withHistory } from "./history.ts";
 import { runWeeklyTree } from "./weekly-tree.ts";
 import { runStatsSheet } from "./stats-sheet.ts";
 import { runBids } from "./bids.ts";
+import { runKeywordGrowth } from "./keyword-growth.ts";
 import {
   authorizeUrl,
   exchangeCode,
@@ -594,6 +595,25 @@ export default async function plugin(bb: BbPluginApi) {
               runOpts,
             )
           ).rows,
+        "keyword-growth": (project, day, runOpts) =>
+          runKeywordGrowth(
+            {
+              now: () => Date.now(),
+              db,
+              client: (pipe) => directFor(pipe.accountId, pipe.clientLogin),
+              loadFeedback: (projectId) => listFeedback(db, projectId),
+              sheets: async () =>
+                createSheetsClient({
+                  clientId: await secrets.get("googleClientId"),
+                  clientSecret: await secrets.get("googleClientSecret"),
+                  refreshToken: await secrets.get("googleRefreshToken"),
+                  fetch,
+                }),
+            },
+            project,
+            day,
+            runOpts,
+          ),
       },
     },
     sendTelegram,
