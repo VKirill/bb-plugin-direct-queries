@@ -142,6 +142,8 @@ export const en = {
   templateStrict: "Strict",
   reportWindowDays: "Report window, days",
   excludeInDirect: "Exclude in Direct",
+  statsSheet: "Statistics and bids sheet",
+  statsSheetId: "Sheet (link or id)",
 };
 
 export const ru: typeof en = {
@@ -286,6 +288,8 @@ export const ru: typeof en = {
   templateStrict: "Строгий",
   reportWindowDays: "Окно отчёта, дней",
   excludeInDirect: "Исключать в Директе",
+  statsSheet: "Лист статистики и ставок",
+  statsSheetId: "Таблица (ссылка или id)",
 };
 
 export type Locale = "en" | "ru";

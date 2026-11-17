@@ -200,7 +200,7 @@ const approvedNegatives = (feedback: FeedbackRow[], queries: QueryRow[]): Approv
 };
 
 export async function campaignIdsFor(
-  deps: PipelineDeps,
+  deps: Pick<PipelineDeps, "listCampaigns">,
   pipe: ProjectPipeline,
   account: AccountRow,
 ): Promise<number[] | undefined> {

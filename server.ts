@@ -39,6 +39,7 @@ import {
 import { createSecrets, type SecretName } from "./secrets.ts";
 import { runLibrarySync, runPipeline, type PipelineDeps } from "./pipeline.ts";
 import { runWeeklyTree } from "./weekly-tree.ts";
+import { runStatsSheet } from "./stats-sheet.ts";
 import {
   authorizeUrl,
   exchangeCode,
@@ -463,6 +464,32 @@ export default async function plugin(bb: BbPluginApi) {
       sync: (project, runOpts) => runLibrarySync(deps, project, runOpts),
       jobs: {
         "weekly-tree": (project, day, runOpts) => runWeeklyTree(deps, project, day, runOpts),
+        "stats-sheet": (project, day, runOpts) =>
+          runStatsSheet(
+            {
+              now: () => Date.now(),
+              getAccount: deps.getAccount,
+              ensureFresh: deps.ensureFresh,
+              saveAccount: deps.saveAccount,
+              listCampaigns: deps.listCampaigns,
+              keywordReport: async ({ account, clientLogin, dateFrom, dateTo, campaignIds }) =>
+                (await directClientFor(account, clientLogin)).keywordReport({
+                  dateFrom,
+                  dateTo,
+                  campaignIds,
+                }),
+              sheets: async () =>
+                createSheetsClient({
+                  clientId: await secrets.get("googleClientId"),
+                  clientSecret: await secrets.get("googleClientSecret"),
+                  refreshToken: await secrets.get("googleRefreshToken"),
+                  fetch,
+                }),
+            },
+            project,
+            day,
+            runOpts,
+          ),
       },
     },
     sendTelegram,
