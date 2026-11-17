@@ -17,6 +17,25 @@ describe("i18n", () => {
     expect(ru.analyticsTab).toBe("Аналитика");
   });
 
+  it("names the bids controls in both locales", () => {
+    expect(en.bidsTitle).toBe("Search bids");
+    expect(ru.bidsTitle).toBe("Ставки");
+    expect(en.bidsEnable).toBe(
+      "Adjust search bids along the traffic ladder every 6 hours",
+    );
+    expect(ru.bidsEnable).toBe(
+      "Двигать ставки поиска по лестнице трафика каждые 6 часов",
+    );
+    expect(en.bidsApply).toBe("Change bids in Direct");
+    expect(ru.bidsApply).toBe("Менять ставки в Директе");
+    expect(en.bidsSkipCampaigns).toBe(
+      "Skip campaigns (substring, one per line)",
+    );
+    expect(ru.bidsSkipCampaigns).toBe(
+      "Не трогать кампании (подстрока, по одной в строке)",
+    );
+  });
+
   it("detects ru from document lang", () => {
     document.documentElement.lang = "ru";
     expect(detectLocale()).toBe("ru");

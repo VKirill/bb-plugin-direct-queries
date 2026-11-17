@@ -542,3 +542,130 @@ describe("text columns stay exact strings", () => {
     expect(rows[0].Cost).toBe(12.5);
   });
 });
+
+describe("keywordbids", () => {
+  it("keywordBids posts the ELIGIBLE bid forecast selection", async () => {
+    const { fetch, calls } = fakeFetch([
+      ok({
+        KeywordBids: [
+          {
+            KeywordId: 7,
+            CampaignId: 11,
+            AdGroupId: 3,
+            ServingStatus: "ELIGIBLE",
+            Search: {
+              Bid: 12_000_000,
+              AuctionBids: {
+                AuctionBidItems: [{ TrafficVolume: 100, Bid: 12_000_000, Price: 900_000 }],
+              },
+            },
+          },
+        ],
+      }),
+    ]);
+    const client = createDirectClient({ token: "t", fetch });
+    const rows = await client.keywordBids([11, 22]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].KeywordId).toBe(7);
+    expect(rows[0].Search?.Bid).toBe(12_000_000);
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(calls[0].init?.body ?? "{}") as {
+      method: string;
+      params: Record<string, unknown>;
+    };
+    expect(body).toEqual({
+      method: "get",
+      params: {
+        SelectionCriteria: { CampaignIds: [11, 22], ServingStatuses: ["ELIGIBLE"] },
+        FieldNames: ["KeywordId", "CampaignId", "AdGroupId", "ServingStatus"],
+        SearchFieldNames: ["Bid", "AuctionBids"],
+        Page: { Limit: 10000 },
+      },
+    });
+  });
+
+  it("keywordBids batches campaign ids by 10", async () => {
+    const { fetch, calls } = fakeFetch([ok({ KeywordBids: [] }), ok({ KeywordBids: [] })]);
+    const client = createDirectClient({ token: "t", fetch });
+    await client.keywordBids(Array.from({ length: 11 }, (_, i) => i + 1));
+    expect(calls).toHaveLength(2);
+    const bodies = calls.map(
+      (c) =>
+        JSON.parse(c.init?.body ?? "{}") as {
+          params: { SelectionCriteria: { CampaignIds: number[] } };
+        },
+    );
+    expect(bodies[0].params.SelectionCriteria.CampaignIds).toHaveLength(10);
+    expect(bodies[1].params.SelectionCriteria.CampaignIds).toEqual([11]);
+  });
+
+  it("setKeywordBids posts KeywordBids and splits ok and rejected", async () => {
+    const { fetch, calls } = fakeFetch([
+      ok({
+        SetResults: [{}, { Errors: [{ Details: "bad bid" }] }, { Warnings: [{ Message: "w" }] }],
+      }),
+    ]);
+    const client = createDirectClient({ token: "t", fetch });
+    const result = await client.setKeywordBids([
+      { keywordId: 5, searchBid: 1_000_000 },
+      { keywordId: 6, searchBid: 2_000_000 },
+      { keywordId: 7, searchBid: 3_000_000 },
+    ]);
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(calls[0].init?.body ?? "{}") as {
+      method: string;
+      params: Record<string, unknown>;
+    };
+    expect(body).toEqual({
+      method: "set",
+      params: {
+        KeywordBids: [
+          { KeywordId: 5, SearchBid: 1_000_000 },
+          { KeywordId: 6, SearchBid: 2_000_000 },
+          { KeywordId: 7, SearchBid: 3_000_000 },
+        ],
+      },
+    });
+    expect(result.ok).toEqual([5, 7]);
+    expect(result.rejected).toEqual([{ keywordId: 6, details: "bad bid" }]);
+  });
+
+  it("setKeywordBids throws when SetResults is missing", async () => {
+    const { fetch } = fakeFetch([ok({})]);
+    const client = createDirectClient({ token: "t", fetch });
+    await expect(
+      client.setKeywordBids([{ keywordId: 1, searchBid: 1_000_000 }]),
+    ).rejects.toThrow("no SetResults");
+  });
+});
+
+describe("keywordReport fields", () => {
+  it("sends the given FieldNames and parses the rows", async () => {
+    const tsv = "CriterionId\tImpressions\tAvgImpressionPosition\n7\t10\t2.5\n";
+    const { fetch, calls } = fakeFetch([res(200, tsv)]);
+    const client = createDirectClient({ token: "t", fetch });
+    const rows = await client.keywordReport({
+      dateFrom: "2026-11-04",
+      dateTo: "2026-11-04",
+      campaignIds: [11],
+      reportName: "bids-test",
+      fields: ["CriterionId", "Impressions", "AvgImpressionPosition"],
+    });
+    const body = JSON.parse(calls[0].init?.body ?? "{}") as { params: unknown };
+    expect(body.params).toEqual({
+      SelectionCriteria: {
+        DateFrom: "2026-11-04",
+        DateTo: "2026-11-04",
+        Filter: [{ Field: "CampaignId", Operator: "IN", Values: ["11"] }],
+      },
+      FieldNames: ["CriterionId", "Impressions", "AvgImpressionPosition"],
+      ReportName: "bids-test",
+      ReportType: "CRITERIA_PERFORMANCE_REPORT",
+      DateRangeType: "CUSTOM_DATE",
+      Format: "TSV",
+      IncludeVAT: "YES",
+      IncludeDiscount: "NO",
+    });
+    expect(rows).toEqual([{ CriterionId: 7, Impressions: 10, AvgImpressionPosition: 2.5 }]);
+  });
+});

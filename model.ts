@@ -147,6 +147,13 @@ export const pipelineSchema = z
           .transform((value) => extractSheetId(value)),
       })
       .optional(),
+    bids: z
+      .object({
+        enabled: z.boolean().default(false),
+        apply: z.boolean().default(false),
+        skipCampaigns: z.array(z.string()).default(["По минималке"]),
+      })
+      .optional(),
   })
   .transform((pipe) => ({
     ...pipe,
@@ -263,6 +270,21 @@ export function pipelineJobs(pipeline: ProjectPipeline): Job[] {
       reportDay: "yesterday",
       prelude: "",
       stages: [stage("stats", "Статистика", true)],
+      catchUpHours: [],
+      timeoutMin: 60,
+      enabled: true,
+    });
+  }
+  if (pipeline.bids?.enabled) {
+    jobs.push({
+      id: "bids",
+      title: "Ставки",
+      hours: [0, 6, 12, 18],
+      minute: 3,
+      weekdays: ALL_DAYS,
+      reportDay: "today",
+      prelude: "",
+      stages: [stage("bids", "Ставки", true)],
       catchUpHours: [],
       timeoutMin: 60,
       enabled: true,

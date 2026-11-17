@@ -78,6 +78,16 @@ export const MIGRATIONS: string[] = [
     note TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS change_history_account_at ON change_history (account_id, at)`,
+  `CREATE TABLE IF NOT EXISTS bid_state (
+    project_id TEXT NOT NULL,
+    keyword_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    impressions INTEGER NOT NULL,
+    weighted REAL NOT NULL,
+    since_impressions INTEGER NOT NULL,
+    since_weighted REAL NOT NULL,
+    PRIMARY KEY (project_id, keyword_id)
+  )`,
 ];
 
 const ADD_COLUMN = /^ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)/i;
@@ -348,6 +358,61 @@ export function listFeedback(db: Database.Database, projectId: string): Feedback
     day: String(r.day),
     pulledAt: Number(r.pulled_at),
   }));
+}
+
+export type BidMemory = {
+  keywordId: number;
+  day: string;
+  impressions: number;
+  weighted: number;
+  sinceImpressions: number;
+  sinceWeighted: number;
+};
+
+export function loadBidState(db: Database.Database, projectId: string): Map<number, BidMemory> {
+  const rows = db.prepare(`SELECT * FROM bid_state WHERE project_id = ?`).all(projectId) as Array<
+    Record<string, unknown>
+  >;
+  const out = new Map<number, BidMemory>();
+  for (const r of rows) {
+    const keywordId = Number(r.keyword_id);
+    out.set(keywordId, {
+      keywordId,
+      day: String(r.day),
+      impressions: Number(r.impressions),
+      weighted: Number(r.weighted),
+      sinceImpressions: Number(r.since_impressions),
+      sinceWeighted: Number(r.since_weighted),
+    });
+  }
+  return out;
+}
+
+export function saveBidState(db: Database.Database, projectId: string, rows: BidMemory[]): void {
+  const ins = db.prepare(
+    `INSERT INTO bid_state (project_id, keyword_id, day, impressions, weighted, since_impressions, since_weighted)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(project_id, keyword_id) DO UPDATE SET
+       day=excluded.day,
+       impressions=excluded.impressions,
+       weighted=excluded.weighted,
+       since_impressions=excluded.since_impressions,
+       since_weighted=excluded.since_weighted`,
+  );
+  const tx = db.transaction(() => {
+    for (const r of rows) {
+      ins.run(
+        projectId,
+        r.keywordId,
+        r.day,
+        r.impressions,
+        r.weighted,
+        r.sinceImpressions,
+        r.sinceWeighted,
+      );
+    }
+  });
+  tx();
 }
 
 export function cacheGet<T>(db: Database.Database, ns: string, key: string, now: number): T | undefined {

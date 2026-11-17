@@ -72,3 +72,40 @@ describe("pipelineSchema schedule and negatives", () => {
     expect(explicit.negatives).toEqual({ level: "adgroup", apply: true });
   });
 });
+
+describe("pipelineSchema bids", () => {
+  it("defaults bids fields and adds the bids job at [0,6,12,18] minute 3", () => {
+    const pipe = pipelineSchema.parse({ ...base, bids: { enabled: true } });
+    expect(pipe.bids).toEqual({
+      enabled: true,
+      apply: false,
+      skipCampaigns: ["По минималке"],
+    });
+    const job = pipelineJobs(pipe).find((j) => j.id === "bids")!;
+    expect(job.hours).toEqual([0, 6, 12, 18]);
+    expect(job.minute).toBe(3);
+    expect(job.weekdays).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(job.reportDay).toBe("today");
+    expect(job.timeoutMin).toBe(60);
+    expect(job.catchUpHours).toEqual([]);
+    expect(job.stages).toEqual([
+      {
+        id: "bids",
+        title: "Ставки",
+        command: "",
+        required: true,
+        outputs: [],
+        reuse: false,
+        emptyStops: false,
+      },
+    ]);
+  });
+
+  it("no bids job without bids.enabled", () => {
+    const pipe = pipelineSchema.parse(base);
+    expect(pipe.bids).toBeUndefined();
+    expect(pipelineJobs(pipe).some((j) => j.id === "bids")).toBe(false);
+    const off = pipelineSchema.parse({ ...base, bids: { enabled: false, apply: true } });
+    expect(pipelineJobs(off).some((j) => j.id === "bids")).toBe(false);
+  });
+});
