@@ -36,6 +36,7 @@ export type PublishDayResult = {
 };
 
 export const PLACEMENT_TAB = "Площадки";
+export const WEEKLY_TREE_TAB = "Расходы по неделям";
 export const PLACEMENT_COLUMNS = [
   "Кампания",
   "Площадка",
@@ -640,5 +641,127 @@ export const createSheetsClient = (input: CreateSheetsClientInput) => {
     };
   };
 
-  return { publishDay, pullDecisions, shareByLink, refreshLibraryColumn, publishPlacements };
+  const publishWeeklyTree = async (
+    sheetId: string,
+    header: string[],
+    rows: (string | number)[][],
+    groups: { start: number; end: number; depth: number }[],
+  ): Promise<void> => {
+    const meta = asRecord(
+      await api(
+        "GET",
+        `/${sheetId}?fields=sheets(properties(sheetId,title,index,gridProperties(rowCount,columnCount)),rowGroups)`,
+      ),
+    );
+    const list = Array.isArray(meta.sheets) ? meta.sheets : [];
+    let existing:
+      | {
+          sheetId: number;
+          rowCount: number;
+          columnCount: number;
+          groups: {
+            range: { sheetId: number; dimension: string; startIndex: number; endIndex: number };
+            depth: number;
+          }[];
+        }
+      | undefined;
+    for (const item of list) {
+      const entry = asRecord(item);
+      const props = asRecord(entry.properties);
+      if (String(props.title ?? "") !== WEEKLY_TREE_TAB) continue;
+      const grid = asRecord(props.gridProperties);
+      const sid = Number(props.sheetId);
+      const rowGroups = Array.isArray(entry.rowGroups) ? entry.rowGroups : [];
+      existing = {
+        sheetId: sid,
+        rowCount: Number(grid.rowCount ?? 0),
+        columnCount: Number(grid.columnCount ?? 0),
+        groups: rowGroups.map((group) => {
+          const g = asRecord(group);
+          const range = asRecord(g.range);
+          return {
+            range: {
+              sheetId: sid,
+              dimension: "ROWS",
+              startIndex: Number(range.startIndex),
+              endIndex: Number(range.endIndex),
+            },
+            depth: Number(g.depth ?? 0),
+          };
+        }),
+      };
+      break;
+    }
+    let tabId: number;
+    if (existing === undefined) {
+      const reply = asRecord(
+        await api("POST", `/${sheetId}:batchUpdate`, {
+          requests: [
+            {
+              addSheet: {
+                properties: {
+                  title: WEEKLY_TREE_TAB,
+                  index: 0,
+                  gridProperties: {
+                    rowCount: Math.max(rows.length + 1, 2),
+                    columnCount: header.length,
+                    frozenRowCount: 1,
+                    frozenColumnCount: 1,
+                  },
+                },
+              },
+            },
+          ],
+        }),
+      );
+      const replies = Array.isArray(reply.replies) ? reply.replies : [];
+      tabId = Number(asRecord(asRecord(asRecord(replies[0]).addSheet).properties).sheetId);
+    } else {
+      tabId = existing.sheetId;
+      await api("POST", `/${sheetId}:batchUpdate`, {
+        requests: [
+          {
+            updateSheetProperties: {
+              properties: {
+                sheetId: tabId,
+                index: 0,
+                gridProperties: {
+                  rowCount: Math.max(rows.length + 1, existing.rowCount, 2),
+                  columnCount: Math.max(header.length, existing.columnCount),
+                  frozenRowCount: 1,
+                  frozenColumnCount: 1,
+                },
+              },
+              fields:
+                "index,gridProperties.rowCount,gridProperties.columnCount,gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+            },
+          },
+        ],
+      });
+    }
+    await api("POST", `/${sheetId}/values/${encodeRange(`'${WEEKLY_TREE_TAB}'`)}:clear`, {});
+    await api("PUT", `/${sheetId}/values/${encodeRange(`'${WEEKLY_TREE_TAB}'!A1`)}?valueInputOption=RAW`, {
+      values: [header, ...rows],
+    });
+    const requests: unknown[] = [
+      ...[...(existing?.groups ?? [])]
+        .sort((a, b) => b.depth - a.depth)
+        .map((group) => ({ deleteDimensionGroup: { range: group.range } })),
+      ...groups.map((group) => ({
+        addDimensionGroup: {
+          range: {
+            sheetId: tabId,
+            dimension: "ROWS",
+            startIndex: group.start,
+            endIndex: group.end,
+          },
+        },
+      })),
+    ];
+    if (requests.length > 0) {
+      await api("POST", `/${sheetId}:batchUpdate`, { requests });
+    }
+  };
+
+  return { publishDay, pullDecisions, shareByLink, refreshLibraryColumn, publishPlacements, publishWeeklyTree };
 };

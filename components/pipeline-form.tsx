@@ -471,6 +471,34 @@ export function PipelineForm({
           onChange={(e) => setPipe({ schedule: { ...pipe.schedule, syncHours: parseHours(e.target.value) } })}
         />
       </div>
+      <div className="dq-field">
+        <Label>{t.weeklyTree}</Label>
+        <Switch
+          checked={pipe.weeklyTree?.enabled ?? false}
+          onCheckedChange={(v) =>
+            setPipe({
+              weeklyTree: { enabled: v, weeks: pipe.weeklyTree?.weeks ?? 8 },
+            })
+          }
+        />
+      </div>
+      <div className="dq-field">
+        <Label>{t.weeklyTreeWeeks}</Label>
+        <Input
+          type="number"
+          min={1}
+          max={52}
+          value={pipe.weeklyTree?.weeks ?? 8}
+          onChange={(e) =>
+            setPipe({
+              weeklyTree: {
+                enabled: pipe.weeklyTree?.enabled ?? false,
+                weeks: Number(e.target.value),
+              },
+            })
+          }
+        />
+      </div>
       <h3>{t.placementsTitle}</h3>
       <div className="dq-field">
         <Label>{t.analyzePlacements}</Label>

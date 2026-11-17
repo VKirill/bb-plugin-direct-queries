@@ -38,6 +38,7 @@ import {
 } from "./db.ts";
 import { createSecrets, type SecretName } from "./secrets.ts";
 import { runLibrarySync, runPipeline, type PipelineDeps } from "./pipeline.ts";
+import { runWeeklyTree } from "./weekly-tree.ts";
 import {
   authorizeUrl,
   exchangeCode,
@@ -383,6 +384,16 @@ function liveDeps(
       });
       return sheets.publishPlacements(sheetId, rows);
     },
+    weeklyCache: cachePort(db, "weekly-tree", now),
+    publishWeeklyTree: async (sheetId, header, rows, groups) => {
+      const sheets = createSheetsClient({
+        clientId: await secrets.get("googleClientId"),
+        clientSecret: await secrets.get("googleClientSecret"),
+        refreshToken: await secrets.get("googleRefreshToken"),
+        fetch: fetchFn,
+      });
+      await sheets.publishWeeklyTree(sheetId, header, rows, groups);
+    },
     campaignExcludedSites: async ({ account, clientLogin, campaignIds }) => {
       const client = await directClientFor(account, clientLogin);
       return client.campaignExcludedSites(campaignIds);
@@ -450,6 +461,9 @@ export default async function plugin(bb: BbPluginApi) {
     pipeline: {
       run: (project, day, runOpts) => runPipeline(deps, project, day, runOpts),
       sync: (project, runOpts) => runLibrarySync(deps, project, runOpts),
+      jobs: {
+        "weekly-tree": (project, day, runOpts) => runWeeklyTree(deps, project, day, runOpts),
+      },
     },
     sendTelegram,
   });
