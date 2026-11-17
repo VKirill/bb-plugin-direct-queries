@@ -38,6 +38,17 @@ const PLACEMENT_FIELDS = [
   "Conversions",
 ];
 
+const KEYWORD_FIELDS = [
+  "CampaignName",
+  "Criterion",
+  "Impressions",
+  "Clicks",
+  "Cost",
+  "AvgImpressionPosition",
+  "AvgClickPosition",
+  "AvgTrafficVolume",
+];
+
 export class DirectApiError extends Error {
   readonly code: number;
   readonly detail?: string;
@@ -154,6 +165,24 @@ function parseCell(cell: string): string | number | null {
   return Number.isNaN(n) ? cell : n;
 }
 
+const TEXT_FIELDS = new Set([
+  "Date",
+  "CampaignName",
+  "CampaignType",
+  "AdGroupName",
+  "Criterion",
+  "Query",
+  "Placement",
+  "AdNetworkType",
+  "MatchType",
+  "CriterionType",
+]);
+
+function parseTextCell(cell: string): string | null {
+  if (cell === "--" || cell === "") return null;
+  return cell;
+}
+
 function parseTsv(text: string, fields: string[] = REPORT_FIELDS): SearchQueryRow[] {
   const lines = text.split(/\r?\n/).filter((line) => line.length > 0);
   if (!lines.length) return [];
@@ -167,7 +196,8 @@ function parseTsv(text: string, fields: string[] = REPORT_FIELDS): SearchQueryRo
     const cells = line.split("\t");
     const row: SearchQueryRow = {};
     cols.forEach((field, i) => {
-      row[field] = parseCell(cells[i] ?? "");
+      const cell = cells[i] ?? "";
+      row[field] = TEXT_FIELDS.has(field) ? parseTextCell(cell) : parseCell(cell);
     });
     return row;
   });
@@ -530,6 +560,7 @@ export function createDirectClient(opts: DirectClientOptions) {
       campaignIds?: number[];
       reportName?: string;
     }): Promise<SearchQueryRow[]> {
+      if (args.campaignIds?.length === 0) return [];
       const params = {
         SelectionCriteria: {
           DateFrom: args.dateFrom,
@@ -556,6 +587,7 @@ export function createDirectClient(opts: DirectClientOptions) {
       campaignIds?: number[];
       reportName?: string;
     }): Promise<SearchQueryRow[]> {
+      if (args.campaignIds?.length === 0) return [];
       const filter = [
         { Field: "AdNetworkType", Operator: "EQUALS", Values: ["AD_NETWORK"] },
         ...(args.campaignIds?.length
@@ -579,6 +611,34 @@ export function createDirectClient(opts: DirectClientOptions) {
         IncludeDiscount: "NO",
       };
       return reportRows(params, PLACEMENT_FIELDS);
+    },
+
+    async keywordReport(args: {
+      dateFrom: string;
+      dateTo: string;
+      campaignIds?: number[];
+      reportName?: string;
+    }): Promise<SearchQueryRow[]> {
+      if (args.campaignIds?.length === 0) return [];
+      const params = {
+        SelectionCriteria: {
+          DateFrom: args.dateFrom,
+          DateTo: args.dateTo,
+          ...(args.campaignIds?.length
+            ? { Filter: [{ Field: "CampaignId", Operator: "IN", Values: args.campaignIds.map(String) }] }
+            : {}),
+        },
+        FieldNames: KEYWORD_FIELDS,
+        ReportName:
+          args.reportName ??
+          `direct-queries keywords ${args.dateFrom}_${args.dateTo} ${Math.floor(now() / 1000)}`,
+        ReportType: "CRITERIA_PERFORMANCE_REPORT",
+        DateRangeType: "CUSTOM_DATE",
+        Format: "TSV",
+        IncludeVAT: "YES",
+        IncludeDiscount: "NO",
+      };
+      return reportRows(params, KEYWORD_FIELDS);
     },
   };
 }

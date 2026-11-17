@@ -155,15 +155,16 @@ export const createSheetsClient = (input: CreateSheetsClientInput) => {
   const now = input.now ?? Date.now;
   let cached: { token: string; expiresAt: number } | undefined;
 
-  const retryJson = async (url: string, init: RequestInit): Promise<unknown> => {
+  const retryJson = async (url: string, init: RequestInit, retry = true): Promise<unknown> => {
+    const maxAttempts = retry ? MAX_ATTEMPTS : 1;
     let lastError: unknown;
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         const response = await input.fetch(url, init);
         if (response.status === 429 || response.status >= 500) {
           const body = await response.text();
           lastError = new Error(`Google Sheets HTTP ${response.status}: ${body.slice(0, 500)}`);
-          if (attempt >= MAX_ATTEMPTS - 1) break;
+          if (attempt >= maxAttempts - 1) break;
           const fallback = RETRY_DELAYS[attempt] ?? RETRY_DELAYS[RETRY_DELAYS.length - 1];
           await sleep(retryAfterSeconds(response.headers, fallback));
           continue;
@@ -179,7 +180,7 @@ export const createSheetsClient = (input: CreateSheetsClientInput) => {
           const code = Number(error.message.slice("Google Sheets HTTP ".length).split(":")[0]);
           if (code !== 429 && !(code >= 500)) throw error;
         }
-        if (attempt >= MAX_ATTEMPTS - 1) break;
+        if (attempt >= maxAttempts - 1) break;
         await sleep(RETRY_DELAYS[attempt] ?? RETRY_DELAYS[RETRY_DELAYS.length - 1]);
       }
     }
@@ -207,16 +208,25 @@ export const createSheetsClient = (input: CreateSheetsClientInput) => {
     return token;
   };
 
-  const api = async (method: string, path: string, payload?: unknown): Promise<unknown> => {
+  const api = async (
+    method: string,
+    path: string,
+    payload?: unknown,
+    opts?: { retry?: boolean },
+  ): Promise<unknown> => {
     const token = await getToken();
-    return retryJson(`${SHEETS_API}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
+    return retryJson(
+      `${SHEETS_API}${path}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: payload === undefined ? undefined : JSON.stringify(payload),
       },
-      body: payload === undefined ? undefined : JSON.stringify(payload),
-    });
+      opts?.retry !== false,
+    );
   };
 
   const drive = async (method: string, url: string, payload?: unknown): Promise<unknown> => {
@@ -763,5 +773,70 @@ export const createSheetsClient = (input: CreateSheetsClientInput) => {
     }
   };
 
-  return { publishDay, pullDecisions, shareByLink, refreshLibraryColumn, publishPlacements, publishWeeklyTree };
+  const readValues = async (sheetId: string, range: string): Promise<unknown[][]> => {
+    const body = asRecord(
+      await api("GET", `/${sheetId}/values/${encodeRange(range)}?valueRenderOption=UNFORMATTED_VALUE`),
+    );
+    const values = body.values;
+    return Array.isArray(values) ? (values as unknown[][]) : [];
+  };
+
+  const writeValues = async (
+    sheetId: string,
+    range: string,
+    values: (string | number)[][],
+  ): Promise<void> => {
+    await api("PUT", `/${sheetId}/values/${encodeRange(range)}?valueInputOption=RAW`, { values });
+  };
+
+  const appendValues = async (
+    sheetId: string,
+    range: string,
+    values: (string | number)[][],
+  ): Promise<void> => {
+    await api(
+      "POST",
+      `/${sheetId}/values/${encodeRange(range)}:append?valueInputOption=RAW&insertDataOption=OVERWRITE`,
+      { values },
+      { retry: false },
+    );
+  };
+
+  const addTab = async (sheetId: string, title: string): Promise<number> => {
+    const reply = asRecord(
+      await api("POST", `/${sheetId}:batchUpdate`, {
+        requests: [
+          {
+            addSheet: {
+              properties: { title, gridProperties: { frozenRowCount: 1 } },
+            },
+          },
+        ],
+      }),
+    );
+    const replies = Array.isArray(reply.replies) ? reply.replies : [];
+    const added = asRecord(asRecord(asRecord(replies[0]).addSheet).properties);
+    return Number(added.sheetId);
+  };
+
+  const batchUpdate = async (sheetId: string, requests: unknown[]): Promise<void> => {
+    await api("POST", `/${sheetId}:batchUpdate`, { requests });
+  };
+
+  return {
+    publishDay,
+    pullDecisions,
+    shareByLink,
+    refreshLibraryColumn,
+    publishPlacements,
+    publishWeeklyTree,
+    metadata,
+    readValues,
+    writeValues,
+    appendValues,
+    addTab,
+    batchUpdate,
+  };
 };
+
+export type SheetsClient = ReturnType<typeof createSheetsClient>;

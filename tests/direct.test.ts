@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { createDirectClient, DirectApiError } from "../direct.ts";
+import {
+  createDirectClient,
+  DirectApiError,
+  type SearchQueryRow,
+} from "../direct.ts";
 import type { HttpResponse, FetchFn } from "../yandex-oauth.ts";
 
 interface RecordedCall {
@@ -214,5 +218,143 @@ describe("searchQueryReport", () => {
     await expect(
       client.searchQueryReport({ dateFrom: "2026-11-03", dateTo: "2026-11-03" }),
     ).rejects.toThrow("report not ready");
+  });
+});
+
+describe("reports with a campaign selection", () => {
+  const dateArgs = { dateFrom: "2026-11-03", dateTo: "2026-11-03" };
+  const cases: {
+    name: string;
+    run: (
+      client: ReturnType<typeof createDirectClient>,
+      campaignIds: number[],
+    ) => Promise<SearchQueryRow[]>;
+  }[] = [
+    {
+      name: "searchQueryReport",
+      run: (client, campaignIds) =>
+        client.searchQueryReport({ ...dateArgs, campaignIds }),
+    },
+    {
+      name: "placementsReport",
+      run: (client, campaignIds) =>
+        client.placementsReport({ ...dateArgs, campaignIds }),
+    },
+    {
+      name: "keywordReport",
+      run: (client, campaignIds) =>
+        client.keywordReport({ ...dateArgs, campaignIds }),
+    },
+  ];
+
+  for (const { name, run } of cases) {
+    it(`${name} with campaignIds [] resolves to [] with no report call`, async () => {
+      const { fetch, calls } = fakeFetch([]);
+      const client = createDirectClient({ token: "t", fetch });
+      await expect(run(client, [])).resolves.toEqual([]);
+      expect(calls).toHaveLength(0);
+    });
+
+    it(`${name} with campaignIds [5] sends a CampaignId IN filter`, async () => {
+      const { fetch, calls } = fakeFetch([res(200, "")]);
+      const client = createDirectClient({ token: "t", fetch });
+      await run(client, [5]);
+      expect(calls).toHaveLength(1);
+      const body = JSON.parse(calls[0].init?.body ?? "{}") as {
+        params: {
+          SelectionCriteria: {
+            Filter: { Field: string; Operator: string; Values: string[] }[];
+          };
+        };
+      };
+      expect(body.params.SelectionCriteria.Filter).toContainEqual({
+        Field: "CampaignId",
+        Operator: "IN",
+        Values: ["5"],
+      });
+    });
+  }
+});
+
+describe("text columns stay exact strings", () => {
+  it("keywordReport keeps Criterion strings distinct and metrics numeric", async () => {
+    const tsv = [
+      "CampaignName\tCriterion\tImpressions\tClicks\tCost\tAvgImpressionPosition\tAvgClickPosition\tAvgTrafficVolume",
+      "Camp A\t00123\t10\t2\t5.5\t3.1\t1.2\t50",
+      "Camp A\t123\t20\t4\t7.25\t2.9\t1.1\t60",
+      "",
+    ].join("\n");
+    const { fetch } = fakeFetch([res(200, tsv)]);
+    const client = createDirectClient({ token: "t", fetch });
+    const rows = await client.keywordReport({
+      dateFrom: "2026-11-03",
+      dateTo: "2026-11-03",
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows[0].Criterion).toBe("00123");
+    expect(rows[1].Criterion).toBe("123");
+    expect(rows[0].Criterion).not.toBe(rows[1].Criterion);
+    expect(rows[0].Impressions).toBe(10);
+    expect(rows[0].Clicks).toBe(2);
+    expect(rows[0].Cost).toBe(5.5);
+    expect(typeof rows[0].Impressions).toBe("number");
+    expect(typeof rows[0].Clicks).toBe("number");
+    expect(typeof rows[0].Cost).toBe("number");
+  });
+
+  it("searchQueryReport keeps Query '007' a string", async () => {
+    const tsv = [
+      [
+        "Date",
+        "CampaignId",
+        "CampaignName",
+        "AdGroupId",
+        "AdGroupName",
+        "Query",
+        "CriterionType",
+        "Criterion",
+        "MatchType",
+        "TargetingCategory",
+        "Impressions",
+        "Clicks",
+        "Cost",
+        "AvgImpressionPosition",
+        "AvgClickPosition",
+        "Conversions",
+      ].join("\t"),
+      [
+        "2026-11-03",
+        "100",
+        "Camp",
+        "200",
+        "Group",
+        "007",
+        "KEYWORD",
+        "00123",
+        "SYNONYM",
+        "--",
+        "5",
+        "2",
+        "12.5",
+        "3.2",
+        "1.1",
+        "0",
+      ].join("\t"),
+      "",
+    ].join("\n");
+    const { fetch } = fakeFetch([res(200, tsv)]);
+    const client = createDirectClient({ token: "t", fetch });
+    const rows = await client.searchQueryReport({
+      dateFrom: "2026-11-03",
+      dateTo: "2026-11-03",
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].Query).toBe("007");
+    expect(rows[0].Criterion).toBe("00123");
+    expect(rows[0].MatchType).toBe("SYNONYM");
+    expect(rows[0].TargetingCategory).toBeNull();
+    expect(rows[0].Impressions).toBe(5);
+    expect(rows[0].Clicks).toBe(2);
+    expect(rows[0].Cost).toBe(12.5);
   });
 });

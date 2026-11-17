@@ -80,6 +80,14 @@ export type NegativesLevel = z.infer<typeof negativesLevelSchema>;
 export const placementTemplateIdSchema = z.enum(["safe", "apps-and-games", "strict"]);
 export type PlacementTemplateId = z.infer<typeof placementTemplateIdSchema>;
 
+export function extractSheetId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const match = /\/spreadsheets\/d\/([A-Za-z0-9_-]+)/.exec(trimmed);
+  return match ? match[1] : trimmed;
+}
+
 export const pipelineSchema = z
   .object({
     accountId: z.string(),
@@ -128,6 +136,15 @@ export const pipelineSchema = z
       .object({
         enabled: z.boolean().default(false),
         weeks: z.number().int().min(1).max(52).default(8),
+      })
+      .optional(),
+    stats: z
+      .object({
+        enabled: z.boolean().default(false),
+        sheetId: z
+          .string()
+          .optional()
+          .transform((value) => extractSheetId(value)),
       })
       .optional(),
   })
@@ -231,6 +248,21 @@ export function pipelineJobs(pipeline: ProjectPipeline): Job[] {
       reportDay: "today",
       prelude: "",
       stages: [stage("weekly-tree", "Расходы по неделям", true)],
+      catchUpHours: [],
+      timeoutMin: 60,
+      enabled: true,
+    });
+  }
+  if (pipeline.stats?.enabled) {
+    jobs.push({
+      id: "stats-sheet",
+      title: "Статистика",
+      hours: [6],
+      minute: 0,
+      weekdays: ALL_DAYS,
+      reportDay: "yesterday",
+      prelude: "",
+      stages: [stage("stats", "Статистика", true)],
       catchUpHours: [],
       timeoutMin: 60,
       enabled: true,

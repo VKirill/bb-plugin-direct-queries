@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../server.ts";
 import {
+  extractSheetId,
   passportCompleteness,
   type LedgerRow,
   type NegativesLevel,
@@ -67,6 +68,7 @@ function emptyPipeline(): Project {
       library: { enabled: true, apply: false },
       negatives: { level: "library", apply: false },
       placements: { enabled: false, template: "safe", apply: false, days: 7 },
+      stats: { enabled: false },
       schedule: {
         hour: 3,
         mode: "daily",
@@ -498,6 +500,38 @@ export function PipelineForm({
             })
           }
         />
+      </div>
+      <div className="dq-field">
+        <Label>{t.statsSheet}</Label>
+        <Switch
+          checked={pipe.stats?.enabled ?? false}
+          onCheckedChange={(v) => setPipe({ stats: { ...pipe.stats, enabled: v } })}
+        />
+      </div>
+      <div className="dq-field">
+        <Label>{t.statsSheetId}</Label>
+        <div className="dq-actions">
+          <Input
+            value={pipe.stats?.sheetId ?? ""}
+            onChange={(e) =>
+              setPipe({
+                stats: {
+                  enabled: pipe.stats?.enabled ?? false,
+                  sheetId: extractSheetId(e.target.value),
+                },
+              })
+            }
+          />
+          {pipe.stats?.sheetId && (
+            <a
+              href={`https://docs.google.com/spreadsheets/d/${pipe.stats.sheetId}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {t.openSheet}
+            </a>
+          )}
+        </div>
       </div>
       <h3>{t.placementsTitle}</h3>
       <div className="dq-field">

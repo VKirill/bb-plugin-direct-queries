@@ -270,6 +270,45 @@ describe("built-in pipeline schedule", () => {
     expect(started).toEqual(["gamma:2026-11-03"]);
   });
 
+  it("a job id in pipeline.jobs runs its handler instead of pipeline.run", async () => {
+    const store = new MemStore();
+    const host = new FakeHost();
+    const calls: string[] = [];
+    seq = 0;
+    const runner = createRunner({
+      store,
+      host,
+      now: () => currentNow,
+      newRunId: () => `run-${++seq}`,
+      pipeline: {
+        run: async () => {
+          calls.push("run");
+          return [] as LedgerRow[];
+        },
+        sync: async () => {
+          calls.push("sync");
+          return [] as LedgerRow[];
+        },
+        jobs: {
+          "stats-sheet": async (project, day) => {
+            calls.push(`stats:${project.id}:${day}`);
+            return [] as LedgerRow[];
+          },
+        },
+      },
+    });
+    const base = fixturePipelineProject();
+    const project: Project = {
+      ...base,
+      pipeline: { ...base.pipeline!, stats: { enabled: true, sheetId: "stats-1" } },
+    };
+    await store.set("projects", [project]);
+    await store.set("settings", fixtureSettings());
+    const started = await runner.start("gamma", "stats-sheet", "2026-11-03", "manual");
+    expect(started.day).toBe("2026-11-03");
+    expect(calls).toEqual(["stats:gamma:2026-11-03"]);
+  });
+
   it("reportDay today and twice-daily hours each start a run for the same Moscow day", async () => {
     const store = new MemStore();
     const host = new FakeHost();

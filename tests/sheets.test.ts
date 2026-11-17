@@ -107,6 +107,36 @@ describe("createSheetsClient retries", () => {
   });
 });
 
+describe("appendValues", () => {
+  it("sends the :append POST exactly once when fetch fails", async () => {
+    let appendCalls = 0;
+    const waits: number[] = [];
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("oauth2.googleapis.com/token")) {
+        return jsonRes({ access_token: "tok", expires_in: 3600 });
+      }
+      if (url.includes(":append")) {
+        appendCalls += 1;
+        throw new TypeError("fetch failed");
+      }
+      return jsonRes({});
+    };
+    const client = createSheetsClient({
+      ...creds,
+      fetch: fetchFn,
+      sleep: async (seconds) => {
+        waits.push(seconds);
+      },
+    });
+    await expect(
+      client.appendValues("sheet_test", "'Лист'!A1", [["a", 1]]),
+    ).rejects.toThrow("fetch failed");
+    expect(appendCalls).toBe(1);
+    expect(waits).toEqual([]);
+  });
+});
+
 describe("publishDay", () => {
   it("writes nothing for an empty day", async () => {
     let calls = 0;
