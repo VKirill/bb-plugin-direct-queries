@@ -2,6 +2,7 @@ import type { FetchFn } from "./yandex-oauth.ts";
 import { DirectApiError, type DirectTransport } from "./direct.ts";
 
 export const OHMYSEO_MCP_URL = "https://mcp.ohmy-seo.ru/mcp";
+export const OHMY_CALL_TIMEOUT_MS = 150_000;
 const DIRECT_API_TOOL = "yandex_direct_api";
 
 export class OhmyError extends Error {
@@ -149,11 +150,22 @@ const reportFieldNames = (params: unknown): string[] | undefined => {
   return names.length > 0 ? names : undefined;
 };
 
-export function createOhmyClient(opts: { auth: string; fetch: FetchFn }): OhmyClient {
+export function createOhmyClient(opts: {
+  auth: string;
+  fetch: FetchFn;
+  timeoutMs?: number;
+}): OhmyClient {
+  const timeoutMs = opts.timeoutMs ?? OHMY_CALL_TIMEOUT_MS;
   let nextId = 0;
 
   const callTool = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
-    const res = await opts.fetch(OHMYSEO_MCP_URL, {
+    const signal = AbortSignal.timeout(timeoutMs);
+    const init: {
+      method?: string;
+      headers?: Record<string, string>;
+      body?: string;
+      signal?: AbortSignal;
+    } = {
       method: "POST",
       headers: {
         Authorization: opts.auth,
@@ -166,28 +178,37 @@ export function createOhmyClient(opts: { auth: string; fetch: FetchFn }): OhmyCl
         method: "tools/call",
         params: { name, arguments: args },
       }),
-    });
-    if (res.status === 401 || res.status === 403) {
-      throw new OhmyError(`ohmyseo unauthorized (http ${res.status})`, "auth");
-    }
-    if (res.status < 200 || res.status >= 300) {
-      throw new OhmyError(`ohmyseo http ${res.status}`);
-    }
-    const reply = parseReply(await res.text());
-    if (reply.error) {
-      const e = asRecord(reply.error);
-      throw new OhmyError(String(e?.message ?? "ohmyseo rpc error"));
-    }
-    const result = asRecord(reply.result);
-    if (!result) throw new OhmyError("ohmyseo: empty reply");
-    const content = Array.isArray(result.content) ? result.content : [];
-    const first = asRecord(content[0]);
-    const raw = typeof first?.text === "string" ? first.text : "";
-    if (result.isError) throw new OhmyError(raw || "ohmyseo tool error");
+      signal,
+    };
     try {
-      return JSON.parse(raw) as unknown;
-    } catch {
-      return raw;
+      const res = await opts.fetch(OHMYSEO_MCP_URL, init);
+      if (res.status === 401 || res.status === 403) {
+        throw new OhmyError(`ohmyseo unauthorized (http ${res.status})`, "auth");
+      }
+      if (res.status < 200 || res.status >= 300) {
+        throw new OhmyError(`ohmyseo http ${res.status}`);
+      }
+      const reply = parseReply(await res.text());
+      if (reply.error) {
+        const e = asRecord(reply.error);
+        throw new OhmyError(String(e?.message ?? "ohmyseo rpc error"));
+      }
+      const result = asRecord(reply.result);
+      if (!result) throw new OhmyError("ohmyseo: empty reply");
+      const content = Array.isArray(result.content) ? result.content : [];
+      const first = asRecord(content[0]);
+      const raw = typeof first?.text === "string" ? first.text : "";
+      if (result.isError) throw new OhmyError(raw || "ohmyseo tool error");
+      try {
+        return JSON.parse(raw) as unknown;
+      } catch {
+        return raw;
+      }
+    } catch (e) {
+      if (signal.aborted) {
+        throw new OhmyError(`ohmyseo timeout after ${timeoutMs / 1000}s`);
+      }
+      throw e;
     }
   };
 
