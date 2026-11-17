@@ -43,6 +43,7 @@ import { maskText, runLibrarySync, runPipeline, type PipelineDeps } from "./pipe
 import { listChanges, syncDirectChanges, withHistory } from "./history.ts";
 import { runWeeklyTree } from "./weekly-tree.ts";
 import { runStatsSheet } from "./stats-sheet.ts";
+import { runBids } from "./bids.ts";
 import {
   authorizeUrl,
   exchangeCode,
@@ -561,6 +562,38 @@ export default async function plugin(bb: BbPluginApi) {
             day,
             runOpts,
           ),
+        bids: async (project, day, runOpts) =>
+          (
+            await runBids(
+              {
+                now: () => Date.now(),
+                db,
+                client: (pipe) => directFor(pipe.accountId, pipe.clientLogin),
+                ask: async () => {
+                  const judge = createJudge({
+                    decisionKey: await secrets.get("decisionKey"),
+                    typesafeKey: await secrets.get("typesafeKey").catch(() => undefined),
+                    fetch,
+                    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+                    now: () => Date.now(),
+                    cache: cachePort(db, "judge", () => Date.now()),
+                    decisionDeadline: Date.now() + 20 * 60_000,
+                  });
+                  return Object.assign(judge.ask, { backend: judge.lastBackend });
+                },
+                sheets: async () =>
+                  createSheetsClient({
+                    clientId: await secrets.get("googleClientId"),
+                    clientSecret: await secrets.get("googleClientSecret"),
+                    refreshToken: await secrets.get("googleRefreshToken"),
+                    fetch,
+                  }),
+              },
+              project,
+              day,
+              runOpts,
+            )
+          ).rows,
       },
     },
     sendTelegram,

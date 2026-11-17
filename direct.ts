@@ -153,6 +153,23 @@ export interface Keyword {
   State: string;
 }
 
+export interface AuctionBidItem {
+  TrafficVolume?: number;
+  Bid?: number;
+  Price?: number;
+}
+
+export interface KeywordBid {
+  KeywordId: number;
+  CampaignId: number;
+  AdGroupId: number;
+  ServingStatus?: string;
+  Search?: {
+    Bid?: number;
+    AuctionBids?: { AuctionBidItems?: AuctionBidItem[] };
+  };
+}
+
 export interface SharedSet {
   Id: number;
   Name: string;
@@ -588,6 +605,60 @@ export function createDirectClient(opts: DirectClientOptions) {
       return res.UpdateResults;
     },
 
+    async keywordBids(campaignIds: number[]): Promise<KeywordBid[]> {
+      const out: KeywordBid[] = [];
+      for (let i = 0; i < campaignIds.length; i += CRITERIA_BATCH) {
+        const batch = campaignIds.slice(i, i + CRITERIA_BATCH);
+        for await (const item of paged(
+          "keywordbids",
+          {
+            SelectionCriteria: { CampaignIds: batch, ServingStatuses: ["ELIGIBLE"] },
+            FieldNames: ["KeywordId", "CampaignId", "AdGroupId", "ServingStatus"],
+            SearchFieldNames: ["Bid", "AuctionBids"],
+          },
+          "KeywordBids",
+        )) {
+          out.push(item as unknown as KeywordBid);
+        }
+      }
+      return out;
+    },
+
+    async setKeywordBids(
+      items: { keywordId: number; searchBid: number }[],
+    ): Promise<{ ok: number[]; rejected: { keywordId: number; details: string }[] }> {
+      const ok: number[] = [];
+      const rejected: { keywordId: number; details: string }[] = [];
+      for (let i = 0; i < items.length; i += 1000) {
+        const batch = items.slice(i, i + 1000);
+        const res = await call<{ SetResults?: unknown[] }>("keywordbids", "set", {
+          KeywordBids: batch.map((item) => ({
+            KeywordId: item.keywordId,
+            SearchBid: item.searchBid,
+          })),
+        });
+        if (!Array.isArray(res.SetResults)) {
+          throw new DirectApiError(0, "keywordbids.set: no SetResults");
+        }
+        batch.forEach((item, index) => {
+          const result = (res.SetResults![index] ?? {}) as {
+            Errors?: { Details?: string; Message?: string }[];
+          };
+          const errors = Array.isArray(result.Errors) ? result.Errors : [];
+          if (errors.length) {
+            const details = errors
+              .map((e) => e?.Details || e?.Message)
+              .filter(Boolean)
+              .join("; ");
+            rejected.push({ keywordId: item.keywordId, details });
+          } else {
+            ok.push(item.keywordId);
+          }
+        });
+      }
+      return { ok, rejected };
+    },
+
     async sharedSets(ids?: number[]): Promise<SharedSet[]> {
       const criteria: { Ids?: number[] } = {};
       if (ids?.length) criteria.Ids = ids;
@@ -798,8 +869,10 @@ export function createDirectClient(opts: DirectClientOptions) {
       dateTo: string;
       campaignIds?: number[];
       reportName?: string;
+      fields?: string[];
     }): Promise<SearchQueryRow[]> {
       if (args.campaignIds?.length === 0) return [];
+      const fields = args.fields ?? KEYWORD_FIELDS;
       const params = {
         SelectionCriteria: {
           DateFrom: args.dateFrom,
@@ -808,7 +881,7 @@ export function createDirectClient(opts: DirectClientOptions) {
             ? { Filter: [{ Field: "CampaignId", Operator: "IN", Values: args.campaignIds.map(String) }] }
             : {}),
         },
-        FieldNames: KEYWORD_FIELDS,
+        FieldNames: fields,
         ReportName:
           args.reportName ??
           `direct-queries keywords ${args.dateFrom}_${args.dateTo} ${Math.floor(now() / 1000)}`,
@@ -818,7 +891,7 @@ export function createDirectClient(opts: DirectClientOptions) {
         IncludeVAT: "YES",
         IncludeDiscount: "NO",
       };
-      return reportRows(params, KEYWORD_FIELDS);
+      return reportRows(params, fields);
     },
 
     async campaignGoals(campaignIds: number[]): Promise<Map<number, number[]>> {

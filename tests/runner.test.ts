@@ -421,6 +421,50 @@ describe("built-in pipeline schedule", () => {
     expect(seenOpts?.runId).toBe(started.runId);
     expect(host.started).toHaveLength(0);
   });
+
+  it("a bids job id runs its handler instead of pipeline.run", async () => {
+    const store = new MemStore();
+    const host = new FakeHost();
+    seq = 0;
+    const calls: string[] = [];
+    const runner = createRunner({
+      store,
+      host,
+      now: () => currentNow,
+      newRunId: () => `run-${++seq}`,
+      pipeline: {
+        run: async () => {
+          calls.push("run");
+          return [] as LedgerRow[];
+        },
+        sync: async () => {
+          calls.push("sync");
+          return [] as LedgerRow[];
+        },
+        jobs: {
+          bids: async (project, day) => {
+            calls.push(`bids:${project.id}:${day}`);
+            return [] as LedgerRow[];
+          },
+        },
+      },
+    });
+    const base = fixturePipelineProject();
+    const project: Project = {
+      ...base,
+      pipeline: {
+        ...base.pipeline!,
+        bids: { enabled: true, apply: false, skipCampaigns: [] },
+      },
+    };
+    await store.set("projects", [project]);
+    await store.set("settings", fixtureSettings());
+    at(T0300);
+    const started = await runner.start("gamma", "bids", "2026-11-04", "manual");
+    expect(calls).toEqual(["bids:gamma:2026-11-04"]);
+    expect(started.day).toBe("2026-11-04");
+    expect(host.started).toHaveLength(0);
+  });
 });
 
 describe("seeding", () => {

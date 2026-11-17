@@ -6,7 +6,9 @@ import {
   cacheSet,
   getAccount,
   listAccounts,
+  loadBidState,
   publicAccount,
+  saveBidState,
   upsertAccount,
   type AccountRow,
 } from "../db.ts";
@@ -68,6 +70,44 @@ describe("db migrations", () => {
       .prepare(`PRAGMA index_list(change_history)`)
       .all() as Array<{ name: string }>;
     expect(indexes.map((i) => i.name)).toContain("change_history_account_at");
+  });
+
+  it("creates bid_state and round-trips bid memory per project", () => {
+    const db = open();
+    applyMigrations(db);
+    applyMigrations(db);
+    saveBidState(db, "p1", [
+      {
+        keywordId: 7,
+        day: "2026-11-17",
+        impressions: 10,
+        weighted: 25.5,
+        sinceImpressions: 4,
+        sinceWeighted: 9.5,
+      },
+    ]);
+    expect(loadBidState(db, "p1").get(7)).toEqual({
+      keywordId: 7,
+      day: "2026-11-17",
+      impressions: 10,
+      weighted: 25.5,
+      sinceImpressions: 4,
+      sinceWeighted: 9.5,
+    });
+    expect(loadBidState(db, "p2").size).toBe(0);
+    saveBidState(db, "p1", [
+      {
+        keywordId: 7,
+        day: "2026-11-17",
+        impressions: 20,
+        weighted: 40,
+        sinceImpressions: 0,
+        sinceWeighted: 0,
+      },
+    ]);
+    const got = loadBidState(db, "p1").get(7)!;
+    expect(got.sinceImpressions).toBe(0);
+    expect(got.impressions).toBe(20);
   });
 });
 

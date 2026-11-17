@@ -69,6 +69,7 @@ function emptyPipeline(): Project {
       negatives: { level: "library", apply: false },
       placements: { enabled: false, template: "safe", apply: false, days: 7 },
       stats: { enabled: false },
+      bids: { enabled: false, apply: false, skipCampaigns: ["По минималке"] },
       schedule: {
         hour: 3,
         mode: "daily",
@@ -107,6 +108,11 @@ export function PipelineForm({
     template: "safe" as const,
     apply: false,
     days: 7,
+  };
+  const bids = pipe.bids ?? {
+    enabled: false,
+    apply: false,
+    skipCampaigns: ["По минималке"],
   };
 
   useEffect(() => {
@@ -533,6 +539,33 @@ export function PipelineForm({
           )}
         </div>
       </div>
+      <h3>{t.bidsTitle}</h3>
+      <div className="dq-field">
+        <Label>{t.bidsEnable}</Label>
+        <Switch
+          checked={bids.enabled ?? false}
+          onCheckedChange={(v) => setPipe({ bids: { ...bids, enabled: v } })}
+        />
+      </div>
+      <div className="dq-field">
+        <Label>{t.bidsApply}</Label>
+        <Switch
+          checked={bids.apply ?? false}
+          onCheckedChange={(v) => setPipe({ bids: { ...bids, apply: v } })}
+        />
+      </div>
+      <div className="dq-field dq-field-top">
+        <Label>{t.bidsSkipCampaigns}</Label>
+        <textarea
+          className="dq-json"
+          value={(bids.skipCampaigns ?? []).join("\n")}
+          onChange={(e) =>
+            setPipe({
+              bids: { ...bids, skipCampaigns: e.target.value.split("\n") },
+            })
+          }
+        />
+      </div>
       <h3>{t.placementsTitle}</h3>
       <div className="dq-field">
         <Label>{t.analyzePlacements}</Label>
@@ -595,6 +628,14 @@ export function PipelineForm({
                   non_target_examples: compactOpt(pipe.profile.non_target_examples),
                   placement_rules: compactOpt(pipe.profile.placement_rules),
                 },
+                ...(pipe.bids
+                  ? {
+                      bids: {
+                        ...pipe.bids,
+                        skipCampaigns: compact(pipe.bids.skipCampaigns ?? []),
+                      },
+                    }
+                  : {}),
               },
             };
             void rpc.call("projects.save", { project }).then(() => {
