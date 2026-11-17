@@ -7,6 +7,17 @@ const MAX_REPORT_TRIES = 30;
 const DEFAULT_RETRY_IN_SEC = 10;
 const PAGE_LIMIT = 10000;
 const CRITERIA_BATCH = 10;
+const IDS_BATCH = 1000;
+const CHANGES_BATCH = 3000;
+
+export const ALL_CAMPAIGN_STATES = [
+  "ON",
+  "SUSPENDED",
+  "OFF",
+  "ENDED",
+  "ARCHIVED",
+  "CONVERTED",
+];
 
 const REPORT_FIELDS = [
   "Date",
@@ -371,16 +382,16 @@ export function createDirectClient(opts: DirectClientOptions) {
     params: Record<string, unknown>,
     listKey: string,
   ): AsyncGenerator<Record<string, unknown>> {
-    let limitedBy: number | undefined;
+    let offset: number | undefined;
     do {
       const res = await call<CallResult>(service, "get", {
         ...params,
-        Page: { Limit: PAGE_LIMIT, ...(limitedBy !== undefined ? { LimitedBy: limitedBy } : {}) },
+        Page: { Limit: PAGE_LIMIT, ...(offset !== undefined ? { Offset: offset } : {}) },
       });
       const list = (res[listKey] as Record<string, unknown>[] | undefined) ?? [];
       for (const item of list) yield item;
-      limitedBy = res.LimitedBy;
-    } while (limitedBy !== undefined);
+      offset = res.LimitedBy;
+    } while (offset !== undefined);
   }
 
   async function reportRows(
@@ -406,18 +417,26 @@ export function createDirectClient(opts: DirectClientOptions) {
 
     async campaigns(filter?: { states?: string[]; ids?: number[] }): Promise<Campaign[]> {
       const out: Campaign[] = [];
-      for await (const item of paged(
-        "campaigns",
-        {
-          SelectionCriteria: {
-            States: filter?.states ?? ["ON", "SUSPENDED", "OFF"],
-            ...(filter?.ids?.length ? { Ids: filter.ids } : {}),
+      const ids = filter?.ids ?? [];
+      const batches: number[][] = [];
+      for (let i = 0; i < ids.length; i += IDS_BATCH) {
+        batches.push(ids.slice(i, i + IDS_BATCH));
+      }
+      if (!batches.length) batches.push([]);
+      for (const batch of batches) {
+        for await (const item of paged(
+          "campaigns",
+          {
+            SelectionCriteria: {
+              States: filter?.states ?? ["ON", "SUSPENDED", "OFF"],
+              ...(batch.length ? { Ids: batch } : {}),
+            },
+            FieldNames: ["Id", "Name", "State", "Status", "Type", "NegativeKeywords"],
           },
-          FieldNames: ["Id", "Name", "State", "Status", "Type", "NegativeKeywords"],
-        },
-        "Campaigns",
-      )) {
-        out.push(item as unknown as Campaign);
+          "Campaigns",
+        )) {
+          out.push(item as unknown as Campaign);
+        }
       }
       return out;
     },
@@ -444,6 +463,30 @@ export function createDirectClient(opts: DirectClientOptions) {
           "adgroups",
           {
             SelectionCriteria: { CampaignIds: batch },
+            FieldNames: [
+              "Id",
+              "CampaignId",
+              "Name",
+              "NegativeKeywordSharedSetIds",
+              "NegativeKeywords",
+            ],
+          },
+          "AdGroups",
+        )) {
+          out.push(item as unknown as AdGroup);
+        }
+      }
+      return out;
+    },
+
+    async adGroupsByIds(ids: number[]): Promise<AdGroup[]> {
+      const out: AdGroup[] = [];
+      for (let i = 0; i < ids.length; i += IDS_BATCH) {
+        const batch = ids.slice(i, i + IDS_BATCH);
+        for await (const item of paged(
+          "adgroups",
+          {
+            SelectionCriteria: { Ids: batch },
             FieldNames: [
               "Id",
               "CampaignId",
@@ -508,6 +551,24 @@ export function createDirectClient(opts: DirectClientOptions) {
       return out;
     },
 
+    async keywordsByIds(ids: number[]): Promise<Keyword[]> {
+      const out: Keyword[] = [];
+      for (let i = 0; i < ids.length; i += IDS_BATCH) {
+        const batch = ids.slice(i, i + IDS_BATCH);
+        for await (const item of paged(
+          "keywords",
+          {
+            SelectionCriteria: { Ids: batch },
+            FieldNames: ["Id", "Keyword", "CampaignId", "AdGroupId", "State"],
+          },
+          "Keywords",
+        )) {
+          out.push(item as unknown as Keyword);
+        }
+      }
+      return out;
+    },
+
     async deleteKeywords(ids: number[]): Promise<unknown> {
       const res = await call<{ DeleteResults: unknown[] }>("keywords", "delete", {
         SelectionCriteria: { Ids: ids },
@@ -561,11 +622,18 @@ export function createDirectClient(opts: DirectClientOptions) {
     },
 
     async agencyClients(): Promise<AgencyClient[]> {
-      const res = await call<{ Clients: AgencyClient[] }>("agencyclients", "get", {
-        SelectionCriteria: {},
-        FieldNames: ["Login", "ClientInfo"],
-      });
-      return res.Clients ?? [];
+      const out: AgencyClient[] = [];
+      for await (const item of paged(
+        "agencyclients",
+        {
+          SelectionCriteria: {},
+          FieldNames: ["Login", "ClientInfo"],
+        },
+        "Clients",
+      )) {
+        out.push(item as unknown as AgencyClient);
+      }
+      return out;
     },
 
     async campaignExcludedSites(ids: number[]): Promise<Map<number, string[]>> {
@@ -593,6 +661,77 @@ export function createDirectClient(opts: DirectClientOptions) {
         })),
       });
       return res.UpdateResults;
+    },
+
+    async changesCheckCampaigns(
+      timestamp: string,
+    ): Promise<{ Campaigns: { CampaignId: number; ChangesIn: string[] }[]; Timestamp: string }> {
+      const res = await call<{
+        Campaigns?: { CampaignId: number; ChangesIn?: string[] }[];
+        Timestamp?: string;
+      }>("changes", "checkCampaigns", { Timestamp: timestamp });
+      return {
+        Campaigns: (res.Campaigns ?? []).map((c) => ({
+          CampaignId: c.CampaignId,
+          ChangesIn: c.ChangesIn ?? [],
+        })),
+        Timestamp: res.Timestamp ?? timestamp,
+      };
+    },
+
+    async changesCheck(args: {
+      campaignIds: number[];
+      timestamp: string;
+    }): Promise<{
+      Modified: { CampaignIds: number[]; AdGroupIds: number[]; AdIds: number[] };
+      Unprocessed: { CampaignIds: number[]; AdGroupIds: number[]; AdIds: number[] };
+      Timestamp: string;
+    }> {
+      const modified = { CampaignIds: [] as number[], AdGroupIds: [] as number[], AdIds: [] as number[] };
+      const unprocessed = {
+        CampaignIds: [] as number[],
+        AdGroupIds: [] as number[],
+        AdIds: [] as number[],
+      };
+      const fieldNames = ["CampaignIds", "AdGroupIds", "AdIds"];
+      const idKinds = ["CampaignIds", "AdGroupIds", "AdIds"] as const;
+      type IdKind = (typeof idKinds)[number];
+      let timestamp = args.timestamp;
+      for (let i = 0; i < args.campaignIds.length; i += CHANGES_BATCH) {
+        const batch = args.campaignIds.slice(i, i + CHANGES_BATCH);
+        const pending: Record<IdKind, Set<number>> = {
+          CampaignIds: new Set(),
+          AdGroupIds: new Set(),
+          AdIds: new Set(),
+        };
+        let selection: Record<string, number[]> = { CampaignIds: batch };
+        for (let ask = 0; ask < 3; ask += 1) {
+          const res = await call<{
+            Modified?: { CampaignIds?: number[]; AdGroupIds?: number[]; AdIds?: number[] };
+            Unprocessed?: { CampaignIds?: number[]; AdGroupIds?: number[]; AdIds?: number[] };
+            Timestamp?: string;
+          }>("changes", "check", {
+            ...selection,
+            FieldNames: fieldNames,
+            Timestamp: args.timestamp,
+          });
+          if (i === 0 && ask === 0) timestamp = res.Timestamp ?? args.timestamp;
+          modified.CampaignIds.push(...(res.Modified?.CampaignIds ?? []));
+          modified.AdGroupIds.push(...(res.Modified?.AdGroupIds ?? []));
+          modified.AdIds.push(...(res.Modified?.AdIds ?? []));
+          const asked = Object.keys(selection)[0] as IdKind;
+          pending[asked] = new Set(res.Unprocessed?.[asked] ?? []);
+          for (const kind of idKinds) {
+            if (kind === asked) continue;
+            for (const id of res.Unprocessed?.[kind] ?? []) pending[kind].add(id);
+          }
+          const next = idKinds.find((kind) => pending[kind].size > 0);
+          if (!next) break;
+          selection = { [next]: [...pending[next]] };
+        }
+        for (const kind of idKinds) unprocessed[kind].push(...pending[kind]);
+      }
+      return { Modified: modified, Unprocessed: unprocessed, Timestamp: timestamp };
     },
 
     async searchQueryReport(args: {

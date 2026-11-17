@@ -4,6 +4,7 @@ import { addDays, dueSlots, moscowParts } from "./slots.ts";
 import { dayStatus, morningLine } from "./ledger.ts";
 import { seedProjects, seedSettings } from "./seed.ts";
 import type { Trigger as PipelineTrigger } from "./pipeline.ts";
+import type { ChangeOrigin } from "./history.ts";
 
 export interface Store {
   get<T>(key: string): Promise<T | undefined>;
@@ -122,11 +123,17 @@ export function createRunner(args: {
     run: (
       project: Project,
       day: string,
-      opts: { trigger: PipelineTrigger; dryRun?: boolean; runId: string; attempt: number },
+      opts: {
+        trigger: PipelineTrigger;
+        dryRun?: boolean;
+        runId: string;
+        attempt: number;
+        origin?: ChangeOrigin;
+      },
     ) => Promise<LedgerRow[]>;
     sync: (
       project: Project,
-      opts: { runId: string; attempt: number; dryRun?: boolean },
+      opts: { runId: string; attempt: number; dryRun?: boolean; origin?: ChangeOrigin },
     ) => Promise<LedgerRow[]>;
     jobs?: Record<
       string,
@@ -180,6 +187,7 @@ export function createRunner(args: {
     day: string,
     trigger: Trigger,
     dryRun = false,
+    origin?: ChangeOrigin,
   ): Promise<StoredRun> => {
     const project = projects.find((p) => p.id === projectId);
     const job = jobOf(projects, projectId, jobId);
@@ -203,7 +211,7 @@ export function createRunner(args: {
     run.rows = [markerRow(run, firstStage)];
     if (project.pipeline) {
       try {
-        const opts = { trigger, dryRun, runId, attempt: run.attempt };
+        const opts = { trigger, dryRun, runId, attempt: run.attempt, origin };
         const jobHandler = pipeline?.jobs?.[jobId];
         run.rows = jobHandler
           ? await jobHandler(project, day, opts)
@@ -387,6 +395,7 @@ export function createRunner(args: {
       day?: string,
       trigger: Trigger = "manual",
       dryRun = false,
+      origin?: ChangeOrigin,
     ): Promise<{ runId: string; day: string }> {
       await ensure();
       const projects = await loadProjects();
@@ -399,6 +408,7 @@ export function createRunner(args: {
         day ?? (job ? reportDay(job, now()) : moscowParts(now()).date),
         trigger,
         dryRun,
+        origin,
       );
       return { runId: run.runId, day: run.day };
     },

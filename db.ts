@@ -61,6 +61,23 @@ export const MIGRATIONS: string[] = [
   )`,
   `ALTER TABLE accounts ADD COLUMN source TEXT NOT NULL DEFAULT 'yandex'`,
   `ALTER TABLE accounts ADD COLUMN ohmy_label TEXT`,
+  `CREATE TABLE IF NOT EXISTS change_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    client_login TEXT,
+    source TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    campaign_id INTEGER,
+    ad_group_id INTEGER,
+    field TEXT NOT NULL,
+    before TEXT,
+    after TEXT,
+    note TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS change_history_account_at ON change_history (account_id, at)`,
 ];
 
 const ADD_COLUMN = /^ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)/i;
