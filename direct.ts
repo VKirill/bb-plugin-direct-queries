@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { FetchFn } from "./yandex-oauth.ts";
 
 const BASE_URL = "https://api.direct.yandex.com/json/v5/";
@@ -5,6 +6,7 @@ const RETRY_CODES = new Set([52, 152, 506, 1000]);
 const MAX_RETRIES = 3;
 const MAX_REPORT_TRIES = 30;
 const DEFAULT_RETRY_IN_SEC = 10;
+export const REPORT_WAIT_BUDGET_MS = 4 * 60_000;
 const PAGE_LIMIT = 10000;
 const CRITERIA_BATCH = 10;
 const IDS_BATCH = 1000;
@@ -266,6 +268,50 @@ function parseTsv(text: string, fields: string[] = REPORT_FIELDS): SearchQueryRo
   });
 }
 
+const campaignValues = (ids: number[]): string[] =>
+  [...ids].sort((a, b) => a - b).map(String);
+
+// Report names must be stable: the same params always produce the same name so
+// a later run or catch-up reads the report Direct already generated instead of
+// queueing a new one. The hash covers every param that changes the report;
+// boxed goal FieldNames are reduced to plain strings first.
+function stableReportName(
+  params: Record<string, unknown>,
+  clientLogin: string | undefined,
+  label = "",
+  part?: number,
+): string {
+  const criteria = (params.SelectionCriteria ?? {}) as Record<string, unknown>;
+  const hash = createHash("sha1")
+    .update(
+      JSON.stringify({
+        ReportType: params.ReportType,
+        DateFrom: criteria.DateFrom,
+        DateTo: criteria.DateTo,
+        FieldNames: Array.isArray(params.FieldNames)
+          ? params.FieldNames.map(String)
+          : params.FieldNames,
+        Filter: criteria.Filter,
+        Goals: params.Goals,
+        AttributionModels: params.AttributionModels,
+        part,
+        clientLogin,
+      }),
+    )
+    .digest("hex")
+    .slice(0, 12);
+  return `direct-queries${label ? ` ${label}` : ""} ${String(criteria.DateFrom)}_${String(criteria.DateTo)} ${hash}`;
+}
+
+function reportNotReady(params: unknown): DirectApiError {
+  const name = (params as { ReportName?: unknown } | null | undefined)?.ReportName;
+  return new DirectApiError(
+    0,
+    "report not ready",
+    `report ${typeof name === "string" ? name : "(unnamed)"} stays queued in Direct; a catch-up run reads it`,
+  );
+}
+
 interface HttpTransport extends DirectTransport {
   readonly units?: DirectUnits;
 }
@@ -275,8 +321,10 @@ function createHttpTransport(opts: {
   clientLogin?: string;
   fetch: FetchFn;
   sleep: SleepFn;
+  now: () => number;
 }): HttpTransport {
   const sleep = opts.sleep;
+  const now = opts.now;
   let units: DirectUnits | undefined;
 
   const headers = (extra?: Record<string, string>): Record<string, string> => ({
@@ -326,6 +374,7 @@ function createHttpTransport(opts: {
       skipReportHeader: "true",
       skipReportSummary: "true",
     });
+    const startedAt = now();
     for (let attempt = 1; attempt <= MAX_REPORT_TRIES; attempt++) {
       const res = await opts.fetch(`${BASE_URL}reports`, {
         method: "POST",
@@ -334,6 +383,7 @@ function createHttpTransport(opts: {
       });
       units = parseUnits(res.headers.get("Units")) ?? units;
       if (res.status === 201 || res.status === 202) {
+        if (now() - startedAt >= REPORT_WAIT_BUDGET_MS) break;
         const wait = Number(res.headers.get("retryIn")) || DEFAULT_RETRY_IN_SEC;
         await sleep(wait * 1000);
         continue;
@@ -353,7 +403,7 @@ function createHttpTransport(opts: {
       }
       throw new DirectApiError(res.status, `http ${res.status}`, text.slice(0, 300));
     }
-    throw new DirectApiError(0, "report not ready", `still pending after ${MAX_REPORT_TRIES} tries`);
+    throw reportNotReady(params);
   }
 
   return {
@@ -382,6 +432,7 @@ export type DirectClientOptions =
 export function createDirectClient(opts: DirectClientOptions) {
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
+  const clientLogin = "clientLogin" in opts ? opts.clientLogin : undefined;
   const transport: DirectTransport & { readonly units?: DirectUnits } =
     "transport" in opts
       ? opts.transport
@@ -390,6 +441,7 @@ export function createDirectClient(opts: DirectClientOptions) {
           clientLogin: opts.clientLogin,
           fetch: opts.fetch,
           sleep,
+          now,
         });
 
   const call = <T = CallResult>(service: string, method: string, params: unknown): Promise<T> =>
@@ -416,16 +468,17 @@ export function createDirectClient(opts: DirectClientOptions) {
     params: Record<string, unknown>,
     fields: string[],
   ): Promise<SearchQueryRow[]> {
+    const startedAt = now();
     for (let attempt = 1; attempt <= MAX_REPORT_TRIES; attempt++) {
       try {
         return parseTsv(await transport.report(params), fields);
       } catch (e) {
         if (!(e instanceof DirectApiError) || e.code !== 202) throw e;
-        if (attempt === MAX_REPORT_TRIES) break;
+        if (attempt === MAX_REPORT_TRIES || now() - startedAt >= REPORT_WAIT_BUDGET_MS) break;
         await sleep(DEFAULT_RETRY_IN_SEC * 1000);
       }
     }
-    throw new DirectApiError(0, "report not ready", `still pending after ${MAX_REPORT_TRIES} tries`);
+    throw reportNotReady(params);
   }
 
   return {
@@ -862,23 +915,30 @@ export function createDirectClient(opts: DirectClientOptions) {
       reportName?: string;
     }): Promise<SearchQueryRow[]> {
       if (args.campaignIds?.length === 0) return [];
-      const params = {
+      const params: Record<string, unknown> = {
         SelectionCriteria: {
           DateFrom: args.dateFrom,
           DateTo: args.dateTo,
           ...(args.campaignIds?.length
-            ? { Filter: [{ Field: "CampaignId", Operator: "IN", Values: args.campaignIds.map(String) }] }
+            ? {
+                Filter: [
+                  {
+                    Field: "CampaignId",
+                    Operator: "IN",
+                    Values: campaignValues(args.campaignIds),
+                  },
+                ],
+              }
             : {}),
         },
         FieldNames: REPORT_FIELDS,
-        ReportName:
-          args.reportName ?? `direct-queries ${args.dateFrom}_${args.dateTo} ${Math.floor(now() / 1000)}`,
         ReportType: "SEARCH_QUERY_PERFORMANCE_REPORT",
         DateRangeType: "CUSTOM_DATE",
         Format: "TSV",
         IncludeVAT: "YES",
         IncludeDiscount: "NO",
       };
+      params.ReportName = args.reportName ?? stableReportName(params, clientLogin);
       return reportRows(params, REPORT_FIELDS);
     },
 
@@ -892,25 +952,30 @@ export function createDirectClient(opts: DirectClientOptions) {
       const filter = [
         { Field: "AdNetworkType", Operator: "EQUALS", Values: ["AD_NETWORK"] },
         ...(args.campaignIds?.length
-          ? [{ Field: "CampaignId", Operator: "IN", Values: args.campaignIds.map(String) }]
+          ? [
+              {
+                Field: "CampaignId",
+                Operator: "IN",
+                Values: campaignValues(args.campaignIds),
+              },
+            ]
           : []),
       ];
-      const params = {
+      const params: Record<string, unknown> = {
         SelectionCriteria: {
           DateFrom: args.dateFrom,
           DateTo: args.dateTo,
           Filter: filter,
         },
         FieldNames: PLACEMENT_FIELDS,
-        ReportName:
-          args.reportName ??
-          `direct-queries placements ${args.dateFrom}_${args.dateTo} ${Math.floor(now() / 1000)}`,
         ReportType: "CUSTOM_REPORT",
         DateRangeType: "CUSTOM_DATE",
         Format: "TSV",
         IncludeVAT: "YES",
         IncludeDiscount: "NO",
       };
+      params.ReportName =
+        args.reportName ?? stableReportName(params, clientLogin, "placements");
       return reportRows(params, PLACEMENT_FIELDS);
     },
 
@@ -923,24 +988,31 @@ export function createDirectClient(opts: DirectClientOptions) {
     }): Promise<SearchQueryRow[]> {
       if (args.campaignIds?.length === 0) return [];
       const fields = args.fields ?? KEYWORD_FIELDS;
-      const params = {
+      const params: Record<string, unknown> = {
         SelectionCriteria: {
           DateFrom: args.dateFrom,
           DateTo: args.dateTo,
           ...(args.campaignIds?.length
-            ? { Filter: [{ Field: "CampaignId", Operator: "IN", Values: args.campaignIds.map(String) }] }
+            ? {
+                Filter: [
+                  {
+                    Field: "CampaignId",
+                    Operator: "IN",
+                    Values: campaignValues(args.campaignIds),
+                  },
+                ],
+              }
             : {}),
         },
         FieldNames: fields,
-        ReportName:
-          args.reportName ??
-          `direct-queries keywords ${args.dateFrom}_${args.dateTo} ${Math.floor(now() / 1000)}`,
         ReportType: "CRITERIA_PERFORMANCE_REPORT",
         DateRangeType: "CUSTOM_DATE",
         Format: "TSV",
         IncludeVAT: "YES",
         IncludeDiscount: "NO",
       };
+      params.ReportName =
+        args.reportName ?? stableReportName(params, clientLogin, "keywords");
       return reportRows(params, fields);
     },
 
@@ -998,9 +1070,6 @@ export function createDirectClient(opts: DirectClientOptions) {
         const params: Record<string, unknown> = {
           SelectionCriteria: { DateFrom: args.dateFrom, DateTo: args.dateTo },
           FieldNames: fieldNames,
-          ReportName:
-            args.reportName ??
-            `direct-queries perf ${args.dateFrom}_${args.dateTo} ${Math.floor(now() / 1000)}${chunks.length > 1 ? ` part${i + 1}` : ""}`,
           ReportType: "CUSTOM_REPORT",
           DateRangeType: "CUSTOM_DATE",
           Format: "TSV",
@@ -1011,6 +1080,8 @@ export function createDirectClient(opts: DirectClientOptions) {
           params.Goals = chunk.map(String);
           params.AttributionModels = ["AUTO"];
         }
+        params.ReportName =
+          args.reportName ?? stableReportName(params, clientLogin, "perf", i + 1);
         const rows = await reportRows(params, performanceParseFields(chunk));
         if (rows.some((row) => row.Date === "Date")) {
           throw new DirectApiError(0, "report header mismatch");
