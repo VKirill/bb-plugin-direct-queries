@@ -109,3 +109,44 @@ describe("pipelineSchema bids", () => {
     expect(pipelineJobs(off).some((j) => j.id === "bids")).toBe(false);
   });
 });
+
+describe("pipelineSchema keywordGrowth", () => {
+  it("defaults keywordGrowth fields and adds the job at hour 6 minute 20 for today", () => {
+    const pipe = pipelineSchema.parse({ ...base, keywordGrowth: { enabled: true } });
+    expect(pipe.keywordGrowth).toEqual({
+      enabled: true,
+      apply: false,
+      minImpressions: 10,
+      days: 5,
+    });
+    const job = pipelineJobs(pipe).find((j) => j.id === "keyword-growth")!;
+    expect(job.hours).toEqual([6]);
+    expect(job.minute).toBe(20);
+    expect(job.weekdays).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(job.reportDay).toBe("today");
+    expect(job.timeoutMin).toBe(60);
+    expect(job.catchUpHours).toEqual([]);
+    expect(job.stages).toEqual([
+      {
+        id: "keyword-growth",
+        title: "Новые фразы",
+        command: "",
+        required: true,
+        outputs: [],
+        reuse: false,
+        emptyStops: false,
+      },
+    ]);
+  });
+
+  it("no keyword-growth job without keywordGrowth.enabled", () => {
+    const pipe = pipelineSchema.parse(base);
+    expect(pipe.keywordGrowth).toBeUndefined();
+    expect(pipelineJobs(pipe).some((j) => j.id === "keyword-growth")).toBe(false);
+    const off = pipelineSchema.parse({
+      ...base,
+      keywordGrowth: { enabled: false, apply: true },
+    });
+    expect(pipelineJobs(off).some((j) => j.id === "keyword-growth")).toBe(false);
+  });
+});

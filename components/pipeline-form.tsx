@@ -70,6 +70,7 @@ function emptyPipeline(): Project {
       placements: { enabled: false, template: "safe", apply: false, days: 7 },
       stats: { enabled: false },
       bids: { enabled: false, apply: false, skipCampaigns: ["По минималке"] },
+      keywordGrowth: { enabled: false, apply: false, minImpressions: 10, days: 5 },
       schedule: {
         hour: 3,
         mode: "daily",
@@ -113,6 +114,12 @@ export function PipelineForm({
     enabled: false,
     apply: false,
     skipCampaigns: ["По минималке"],
+  };
+  const growth = pipe.keywordGrowth ?? {
+    enabled: false,
+    apply: false,
+    minImpressions: 10,
+    days: 5,
   };
 
   useEffect(() => {
@@ -564,6 +571,21 @@ export function PipelineForm({
               bids: { ...bids, skipCampaigns: e.target.value.split("\n") },
             })
           }
+        />
+      </div>
+      <h3>{t.growthTitle}</h3>
+      <div className="dq-field">
+        <Label>{t.growthEnable}</Label>
+        <Switch
+          checked={growth.enabled ?? false}
+          onCheckedChange={(v) => setPipe({ keywordGrowth: { ...growth, enabled: v } })}
+        />
+      </div>
+      <div className="dq-field">
+        <Label>{t.growthApply}</Label>
+        <Switch
+          checked={growth.apply ?? false}
+          onCheckedChange={(v) => setPipe({ keywordGrowth: { ...growth, apply: v } })}
         />
       </div>
       <h3>{t.placementsTitle}</h3>
