@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 export const en = {
-  title: "Direct queries",
+  title: "Yandex Direct Panel",
   description: "Yandex Direct search-query analysis and negatives",
   dashboardTab: "Dashboard",
   projectsTab: "Projects",
@@ -199,7 +199,7 @@ export const en = {
 };
 
 export const ru: typeof en = {
-  title: "Запросы Директа",
+  title: "Панель Яндекс Директ",
   description: "Анализ поисковых запросов Яндекс Директа и минус-фразы",
   dashboardTab: "Дашборд",
   projectsTab: "Проекты",

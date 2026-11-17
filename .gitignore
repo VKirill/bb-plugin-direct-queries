@@ -5,3 +5,5 @@ dist/
 .env*
 .agents/
 local/
+.claude/
+CLAUDE.md

@@ -34,7 +34,7 @@ describe("navPanel registration", () => {
   it("uses the brand icon name and the English title with lang=en", async () => {
     const reg = await registration();
     expect(reg.icon).toBe("direct-queries/brand");
-    expect(reg.title).toBe("Direct queries");
+    expect(reg.title).toBe("Yandex Direct Panel");
     expect(reg.id).toBe("direct-queries");
     expect(reg.path).toBe("direct-queries");
   });
@@ -43,6 +43,6 @@ describe("navPanel registration", () => {
     document.documentElement.lang = "ru";
     const reg = await registration();
     expect(reg.icon).toBe("direct-queries/brand");
-    expect(reg.title).toBe("Запросы Директа");
+    expect(reg.title).toBe("Панель Яндекс Директ");
   });
 });
