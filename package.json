@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-direct-queries",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "private": false,
   "engines": {
@@ -8,8 +8,8 @@
     "bbPluginSdk": ">=0.6.49"
   },
   "bb": {
-    "name": "Direct Queries",
-    "description": "Registry, nightly pipeline, run ledger and dashboard for Yandex Direct search-query analysis and negatives, with OhMySEO import and RSYA placements.",
+    "name": "Панель Яндекс Директ",
+    "description": "Yandex Direct panel: accounts (Yandex OAuth or OhMySEO), analytics and conversions, change history, search-query judging, negatives, RSYA placements, bids, keyword growth and Google Sheets on a schedule.",
     "branding": {
       "icon": "./assets/icon.svg",
       "logo": {

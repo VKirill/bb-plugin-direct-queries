@@ -120,7 +120,11 @@ describe("dashboard", () => {
   it("shows the Russian heading with lang=ru", async () => {
     document.documentElement.lang = "ru";
     render(createElement(Page));
+    // 0.4.0 renamed the panel to «Панель Яндекс Директ»; the pre-rename heading check is kept below for the record.
+    /*
     expect(await screen.findByRole("heading", { name: "Запросы Директа" })).toBeTruthy();
+    */
+    expect(await screen.findByRole("heading", { name: "Панель Яндекс Директ" })).toBeTruthy();
   });
 
   it("Analytics tab shows spend, clicks, conversions and what to fix", async () => {
