@@ -10,11 +10,12 @@ import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableRow, TableCell } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AccountsTab } from "@/components/accounts.tsx";
+import { AnalyticsTab } from "@/components/analytics.tsx";
 import { KeysPanel } from "@/components/keys.tsx";
 import { PipelineForm } from "@/components/pipeline-form.tsx";
 import "./app.css";
 
-type Tab = "dashboard" | "projects" | "accounts" | "settings";
+type Tab = "dashboard" | "analytics" | "projects" | "accounts" | "settings";
 
 type Cell = { day: string; status: string };
 type OverviewJob = {
@@ -68,6 +69,7 @@ export function Page() {
 
   const tabLabel: Record<Tab, string> = {
     dashboard: t.dashboardTab,
+    analytics: t.analyticsTab,
     projects: t.projectsTab,
     accounts: t.accountsTab,
     settings: t.settingsTab,
@@ -78,7 +80,7 @@ export function Page() {
       <header className="dq-strip">
         <h1>{t.title}</h1>
         <nav className="dq-seg dq-tabs">
-          {(["dashboard", "projects", "accounts", "settings"] as const).map((k) => (
+          {(["dashboard", "analytics", "projects", "accounts", "settings"] as const).map((k) => (
             <button
               key={k}
               type="button"
@@ -95,6 +97,7 @@ export function Page() {
       {tab === "dashboard" && (
         <Dashboard t={t} ov={ov} onPick={setSelected} onRerun={(p, j) => void rpc.call("run", { projectId: p, jobId: j }).then(reload)} onOpenProjects={() => setTab("projects")} />
       )}
+      {tab === "analytics" && <AnalyticsTab t={t} rpc={rpc} />}
       {tab === "projects" && <Projects t={t} rpc={rpc} />}
       {tab === "accounts" && <AccountsTab t={t} rpc={rpc} />}
       {tab === "settings" && <SettingsTab t={t} rpc={rpc} />}

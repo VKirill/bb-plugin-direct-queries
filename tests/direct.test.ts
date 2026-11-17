@@ -96,6 +96,36 @@ describe("retries and errors", () => {
   });
 });
 
+describe("campaigns paging", () => {
+  it("follows LimitedBy and returns the campaigns of both pages", async () => {
+    const { fetch, calls } = fakeFetch([
+      ok({
+        Campaigns: [{ Id: 1, Name: "A", State: "ON", Status: "ACCEPTED", Type: "TEXT_CAMPAIGN" }],
+        LimitedBy: 10000,
+      }),
+      ok({ Campaigns: [{ Id: 2, Name: "B", State: "ON", Status: "ACCEPTED", Type: "TEXT_CAMPAIGN" }] }),
+    ]);
+    const client = createDirectClient({ token: "t", fetch });
+    const campaigns = await client.campaigns();
+    expect(campaigns.map((c) => c.Id)).toEqual([1, 2]);
+    expect(calls).toHaveLength(2);
+    const bodies = calls.map(
+      (c) => JSON.parse(c.init?.body ?? "{}") as { method: string; params: Record<string, unknown> },
+    );
+    expect(bodies[0].method).toBe("get");
+    expect(bodies[0].params).toEqual({
+      SelectionCriteria: { States: ["ON", "SUSPENDED", "OFF"] },
+      FieldNames: ["Id", "Name", "State", "Status", "Type", "NegativeKeywords"],
+      Page: { Limit: 10000 },
+    });
+    expect(bodies[1].params).toEqual({
+      SelectionCriteria: { States: ["ON", "SUSPENDED", "OFF"] },
+      FieldNames: ["Id", "Name", "State", "Status", "Type", "NegativeKeywords"],
+      Page: { Limit: 10000, LimitedBy: 10000 },
+    });
+  });
+});
+
 describe("adGroups", () => {
   it("splits 25 campaign ids into 3 calls of at most 10", async () => {
     const { fetch, calls } = fakeFetch([

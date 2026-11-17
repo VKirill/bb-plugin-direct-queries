@@ -9,7 +9,11 @@ function fakeBb() {
   const registrations = {
     rpc: null as Record<string, (input: unknown) => unknown> | null,
     rpcCalls: [] as Array<Record<string, (input: unknown) => unknown>>,
-    cli: null as { name: string; commands: Array<{ name: string }> } | null,
+    cli: null as {
+      name: string;
+      commands: Array<{ name: string; usage: string }>;
+      run: (argv: string[]) => Promise<{ exitCode: number; stdout?: string; stderr?: string }>;
+    } | null,
     schedules: [] as Array<{ name: string; cron: string }>,
     disposals: [] as Array<() => unknown>,
     http: [] as Array<{ method: string; path: string; auth?: string }>,
@@ -60,7 +64,11 @@ function fakeBb() {
       },
     },
     cli: {
-      register: (decl: { name: string; commands: Array<{ name: string }> }) => {
+      register: (decl: {
+        name: string;
+        commands: Array<{ name: string; usage: string }>;
+        run: (argv: string[]) => Promise<{ exitCode: number; stdout?: string; stderr?: string }>;
+      }) => {
         registrations.cli = decl;
       },
     },
@@ -97,10 +105,20 @@ const RPC_METHODS = [
   "pipeline.preview",
 ];
 
-const CLI_COMMANDS = ["status", "run", "enable", "disable", "morning", "import", "export", "pipeline"];
+const CLI_COMMANDS = [
+  "status",
+  "run",
+  "enable",
+  "disable",
+  "morning",
+  "import",
+  "export",
+  "pipeline",
+  "stats",
+];
 
 describe("server entry", () => {
-  it("registers the ten RPC methods and seven CLI commands of the plan", async () => {
+  it("registers the RPC methods and CLI commands of the plan", async () => {
     const { bb, registrations } = fakeBb();
     await plugin(bb as unknown as BbPluginApi);
     expect(Object.keys(registrations.rpc ?? {})).toEqual(
@@ -110,7 +128,9 @@ describe("server entry", () => {
     expect(registrations.cli?.commands.map((c) => c.name)).toEqual(
       expect.arrayContaining(CLI_COMMANDS),
     );
-    expect(registrations.cli?.commands).toHaveLength(8);
+    expect(registrations.cli?.commands).toHaveLength(9);
+    const stats = registrations.cli?.commands.find((c) => c.name === "stats");
+    expect(stats?.usage.startsWith("bb direct-queries stats")).toBe(true);
     expect(registrations.schedules.map((s) => s.name)).toContain("tick");
     expect(registrations.schedules.find((s) => s.name === "tick")?.cron).toBe("* * * * *");
     expect(registrations.http).toEqual(
@@ -119,6 +139,21 @@ describe("server entry", () => {
         { method: "GET", path: "/oauth/callback", auth: "none" },
       ]),
     );
+  });
+
+  it("stats without --from/--to prints usage", async () => {
+    const { bb, registrations } = fakeBb();
+    await plugin(bb as unknown as BbPluginApi);
+    const result = await registrations.cli!.run(["stats"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("usage");
+  });
+
+  it("registers the analytics RPC", async () => {
+    const { bb, registrations } = fakeBb();
+    await plugin(bb as unknown as BbPluginApi);
+    const analytics = registrations.rpcCalls.find((h) => "analytics" in h);
+    expect(analytics?.["analytics"]).toBeTypeOf("function");
   });
 
   it("registers the OhMySEO account RPCs", async () => {

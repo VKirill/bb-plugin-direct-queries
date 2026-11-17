@@ -81,4 +81,7 @@
   .dq-clients { margin: 0; padding-left: 1.25rem; color: var(--dq-dim); font-size: 0.8rem; }
   .dq-campaigns { display: flex; flex-direction: column; gap: var(--dq-inner); max-height: 12rem; overflow: auto; }
   .dq-check { display: flex; align-items: center; gap: var(--dq-inner); }
+  .dq-an-cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--dq-gap); }
+  .dq-an-cards p { font-size: 1.25rem; font-weight: 600; }
+  @media (max-width: 640px) { .dq-an-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 }
