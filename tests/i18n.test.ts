@@ -12,6 +12,11 @@ describe("i18n", () => {
     expect(Object.keys(ru).sort()).toEqual(Object.keys(en).sort());
   });
 
+  it("names the analytics tab in both locales", () => {
+    expect(en.analyticsTab).toBe("Analytics");
+    expect(ru.analyticsTab).toBe("Аналитика");
+  });
+
   it("detects ru from document lang", () => {
     document.documentElement.lang = "ru";
     expect(detectLocale()).toBe("ru");

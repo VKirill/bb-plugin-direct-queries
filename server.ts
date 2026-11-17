@@ -19,7 +19,9 @@ import { seedProjects, seedSettings } from "./seed.ts";
 import { addDays, moscowParts } from "./slots.ts";
 import { morningLine } from "./ledger.ts";
 import {
+  cacheGet,
   cachePort,
+  cacheSet,
   consumeOauthState,
   getAccount,
   listAccounts,
@@ -49,6 +51,8 @@ import {
   type FetchFn,
 } from "./yandex-oauth.ts";
 import { createDirectClient } from "./direct.ts";
+import { recommendationText, runAnalytics, type Recommendation, type Summary } from "./analytics.ts";
+import { en } from "./i18n.ts";
 import { createOhmyClient, ohmyDirectTransport } from "./ohmyseo.ts";
 import { createSheetsClient } from "./sheets.ts";
 import { createJudge } from "./judge.ts";
@@ -172,6 +176,16 @@ export const rpcContract = defineRpcContract({
   },
   "accounts.campaigns": {
     input: z.object({ accountId: z.string(), clientLogin: z.string().optional() }),
+    output: z.unknown(),
+  },
+  analytics: {
+    input: z.object({
+      accountId: z.string(),
+      clientLogin: z.string().optional(),
+      from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      goals: z.array(z.number().int().positive()).max(100).optional(),
+    }),
     output: z.unknown(),
   },
   ohmyseoAccounts: { input: z.null(), output: z.array(ohmyseoAccountSchema) },
@@ -577,6 +591,32 @@ export default async function plugin(bb: BbPluginApi) {
     return directClientFor(fresh, clientLogin);
   };
 
+  const analyticsFor = async (input: {
+    accountId: string;
+    clientLogin?: string;
+    from: string;
+    to: string;
+    goals?: number[];
+  }) => {
+    if (input.from > input.to) throw new Error("badPeriod");
+    const key = JSON.stringify([
+      input.accountId,
+      input.clientLogin ?? "",
+      input.from,
+      input.to,
+      input.goals ?? "auto",
+    ]);
+    const hit = cacheGet<unknown>(db, "analytics", key, Date.now());
+    if (hit !== undefined) return hit;
+    const result = await runAnalytics(await directFor(input.accountId, input.clientLogin), {
+      from: input.from,
+      to: input.to,
+      goals: input.goals,
+    });
+    cacheSet(db, "analytics", key, result, Date.now() + 30 * 60_000);
+    return result;
+  };
+
   bb.http.route(
     "GET",
     "/oauth/start",
@@ -640,7 +680,7 @@ export default async function plugin(bb: BbPluginApi) {
     { auth: "none" },
   );
 
-  const { ohmyseoAccounts, ohmyseoImport, passportGet, passportSet, ...mainRpcContract } = rpcContract;
+  const { ohmyseoAccounts, ohmyseoImport, passportGet, passportSet, analytics, ...mainRpcContract } = rpcContract;
 
   bb.rpc.register({ ohmyseoAccounts, ohmyseoImport }, {
     ohmyseoAccounts: async () => {
@@ -684,6 +724,10 @@ export default async function plugin(bb: BbPluginApi) {
   bb.rpc.register({ passportGet, passportSet }, {
     passportGet: ({ projectId }) => serial(() => passportViewFor(projectId)),
     passportSet: ({ projectId, passport }) => serial(() => savePassport(projectId, passport)),
+  });
+
+  bb.rpc.register({ analytics }, {
+    analytics: (input) => analyticsFor(input),
   });
 
   bb.rpc.register(mainRpcContract, {
@@ -802,6 +846,12 @@ export default async function plugin(bb: BbPluginApi) {
         name: "pipeline",
         summary: "Run the built-in analysis pipeline",
         usage: "bb direct-queries pipeline run <project> [--date YYYY-MM-DD] [--dry-run]",
+      },
+      {
+        name: "stats",
+        summary: "Show spend, clicks, conversions and CPA of a Direct account",
+        usage:
+          "bb direct-queries stats <account> --from YYYY-MM-DD --to YYYY-MM-DD [--client-login L] [--goals id,id] [--json]",
       },
     ],
     run: async (argv) => {
@@ -953,11 +1003,62 @@ export default async function plugin(bb: BbPluginApi) {
                 "usage: bb direct-queries passport get <project> [--json] | passport set <project> --file <path>",
             };
           }
+          case "stats": {
+            const usage =
+              "bb direct-queries stats <account> --from YYYY-MM-DD --to YYYY-MM-DD [--client-login L] [--goals id,id] [--json]";
+            const accountArg = argv[1];
+            const fromI = argv.indexOf("--from");
+            const toI = argv.indexOf("--to");
+            const from = fromI === -1 ? "" : (argv[fromI + 1] ?? "");
+            const to = toI === -1 ? "" : (argv[toI + 1] ?? "");
+            if (
+              !accountArg ||
+              !/^\d{4}-\d{2}-\d{2}$/.test(from) ||
+              !/^\d{4}-\d{2}-\d{2}$/.test(to)
+            ) {
+              return { exitCode: 1, stderr: `usage: ${usage}` };
+            }
+            const loginI = argv.indexOf("--client-login");
+            const clientLogin = loginI === -1 ? undefined : argv[loginI + 1];
+            const goalsI = argv.indexOf("--goals");
+            let goals: number[] | undefined;
+            if (goalsI !== -1) {
+              const raw = argv[goalsI + 1] ?? "";
+              goals = raw
+                .split(",")
+                .map((part) => Number(part.trim()))
+                .filter((n) => Number.isInteger(n) && n > 0);
+              if (!raw || goals.length === 0) return { exitCode: 1, stderr: `usage: ${usage}` };
+            }
+            const account = listAccounts(db).find(
+              (a) => a.id === accountArg || a.login === accountArg,
+            );
+            if (!account) return { exitCode: 1, stderr: "accountMissing" };
+            const result = (await analyticsFor({
+              accountId: account.id,
+              clientLogin,
+              from,
+              to,
+              goals,
+            })) as { summary: Summary; recommendations: Recommendation[] };
+            if (argv.includes("--json")) return { exitCode: 0, stdout: JSON.stringify(result) };
+            const money = (v: number) => v.toFixed(2);
+            const cpa = (v: number | null) => (v === null ? "—" : `${money(v)} ₽`);
+            const lines = [
+              `spend ${money(result.summary.totals.cost)} ₽, clicks ${result.summary.totals.clicks}, conversions ${result.summary.totals.conversions}, CPA ${cpa(result.summary.totals.cpa)}`,
+              ...result.summary.byCampaign.map(
+                (c) =>
+                  `${c.campaignName}: ${money(c.cost)} ₽, ${c.clicks} clicks, ${c.conversions} conv, CPA ${cpa(c.cpa)}`,
+              ),
+              ...result.recommendations.map((r) => recommendationText(r, en)),
+            ];
+            return { exitCode: 0, stdout: lines.join("\n") };
+          }
           default:
             return {
               exitCode: 0,
               stdout:
-                "bb direct-queries status [--json] | run <project> <job> [--date D] | pipeline run <project> [--date D] [--dry-run] | enable|disable <project> [job] | morning [--dry-run|--send] | import <file> | export | passport get <project> [--json] | passport set <project> --file <path>",
+                "bb direct-queries status [--json] | run <project> <job> [--date D] | pipeline run <project> [--date D] [--dry-run] | enable|disable <project> [job] | morning [--dry-run|--send] | import <file> | export | passport get <project> [--json] | passport set <project> --file <path> | stats <account> --from D --to D [--client-login L] [--goals id,id] [--json]",
             };
         }
       } catch (e) {

@@ -38,6 +38,40 @@ const PLACEMENT_FIELDS = [
   "Conversions",
 ];
 
+const PERFORMANCE_FIELDS = [
+  "Date",
+  "CampaignId",
+  "CampaignName",
+  "CampaignType",
+  "AdNetworkType",
+  "Impressions",
+  "Clicks",
+  "Cost",
+  "Conversions",
+  "CostPerConversion",
+];
+
+const GOALS_PER_REPORT = 10;
+
+function performanceParseFields(goals: number[]): string[] {
+  if (goals.length === 0) return PERFORMANCE_FIELDS;
+  const fields: string[] = [];
+  for (const field of PERFORMANCE_FIELDS) {
+    if (field === "Conversions") {
+      fields.push(...goals.map((goal) => `Conversions_${goal}_AUTO`));
+    } else if (field === "CostPerConversion") {
+      fields.push(...goals.map((goal) => `CostPerConversion_${goal}_AUTO`));
+    } else {
+      fields.push(field);
+    }
+  }
+  return fields;
+}
+
+function performanceRowKey(row: SearchQueryRow): string {
+  return `${String(row.Date ?? "")}|${String(row.CampaignId ?? "")}|${String(row.AdNetworkType ?? "")}`;
+}
+
 const KEYWORD_FIELDS = [
   "CampaignName",
   "Criterion",
@@ -371,14 +405,21 @@ export function createDirectClient(opts: DirectClientOptions) {
     },
 
     async campaigns(filter?: { states?: string[]; ids?: number[] }): Promise<Campaign[]> {
-      const res = await call<{ Campaigns: Campaign[] }>("campaigns", "get", {
-        SelectionCriteria: {
-          States: filter?.states ?? ["ON", "SUSPENDED", "OFF"],
-          ...(filter?.ids?.length ? { Ids: filter.ids } : {}),
+      const out: Campaign[] = [];
+      for await (const item of paged(
+        "campaigns",
+        {
+          SelectionCriteria: {
+            States: filter?.states ?? ["ON", "SUSPENDED", "OFF"],
+            ...(filter?.ids?.length ? { Ids: filter.ids } : {}),
+          },
+          FieldNames: ["Id", "Name", "State", "Status", "Type", "NegativeKeywords"],
         },
-        FieldNames: ["Id", "Name", "State", "Status", "Type", "NegativeKeywords"],
-      });
-      return res.Campaigns ?? [];
+        "Campaigns",
+      )) {
+        out.push(item as unknown as Campaign);
+      }
+      return out;
     },
 
     async updateCampaignNegatives(items: { id: number; phrases: string[] }[]): Promise<unknown> {
@@ -639,6 +680,115 @@ export function createDirectClient(opts: DirectClientOptions) {
         IncludeDiscount: "NO",
       };
       return reportRows(params, KEYWORD_FIELDS);
+    },
+
+    async campaignGoals(campaignIds: number[]): Promise<Map<number, number[]>> {
+      const out = new Map<number, number[]>();
+      for (let i = 0; i < campaignIds.length; i += CRITERIA_BATCH) {
+        const batch = campaignIds.slice(i, i + CRITERIA_BATCH);
+        const res = await call<{
+          Campaigns: {
+            Id: number;
+            TextCampaign?: { PriorityGoals?: { Items?: { GoalId: number }[] } };
+            UnifiedCampaign?: { PriorityGoals?: { Items?: { GoalId: number }[] } };
+          }[];
+        }>("campaigns", "get", {
+          SelectionCriteria: { Ids: batch },
+          FieldNames: ["Id", "Type"],
+          TextCampaignFieldNames: ["PriorityGoals", "CounterIds"],
+          UnifiedCampaignFieldNames: ["PriorityGoals", "CounterIds"],
+        });
+        for (const campaign of res.Campaigns ?? []) {
+          const goals =
+            (campaign.TextCampaign ?? campaign.UnifiedCampaign)?.PriorityGoals?.Items?.map(
+              (item) => item.GoalId,
+            ) ?? [];
+          out.set(campaign.Id, goals);
+        }
+      }
+      return out;
+    },
+
+    async performanceReport(args: {
+      dateFrom: string;
+      dateTo: string;
+      goals?: number[];
+      reportName?: string;
+    }): Promise<SearchQueryRow[]> {
+      const goals = [...new Set(args.goals ?? [])];
+      const chunks: number[][] = [];
+      for (let i = 0; i < goals.length; i += GOALS_PER_REPORT) {
+        chunks.push(goals.slice(i, i + GOALS_PER_REPORT));
+      }
+      if (chunks.length === 0) chunks.push([]);
+      const base: SearchQueryRow[] = [];
+      const byKey = new Map<string, SearchQueryRow>();
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        // Goal reports return Conversions_<id>_AUTO columns that are not valid
+        // Direct FieldNames values. The OhMySEO transport converts micros only
+        // when every TSV header cell appears in params.FieldNames, so boxed
+        // strings keep the JSON request identical while its field-name check
+        // falls back to the pattern that matches the suffixed columns.
+        const fieldNames = chunk.length
+          ? PERFORMANCE_FIELDS.map((field) => new String(field))
+          : PERFORMANCE_FIELDS;
+        const params: Record<string, unknown> = {
+          SelectionCriteria: { DateFrom: args.dateFrom, DateTo: args.dateTo },
+          FieldNames: fieldNames,
+          ReportName:
+            args.reportName ??
+            `direct-queries perf ${args.dateFrom}_${args.dateTo} ${Math.floor(now() / 1000)}${chunks.length > 1 ? ` part${i + 1}` : ""}`,
+          ReportType: "CUSTOM_REPORT",
+          DateRangeType: "CUSTOM_DATE",
+          Format: "TSV",
+          IncludeVAT: "YES",
+          IncludeDiscount: "NO",
+        };
+        if (chunk.length) {
+          params.Goals = chunk.map(String);
+          params.AttributionModels = ["AUTO"];
+        }
+        const rows = await reportRows(params, performanceParseFields(chunk));
+        if (rows.some((row) => row.Date === "Date")) {
+          throw new DirectApiError(0, "report header mismatch");
+        }
+        if (i === 0) {
+          for (const row of rows) {
+            base.push(row);
+            byKey.set(performanceRowKey(row), row);
+          }
+          continue;
+        }
+        for (const row of rows) {
+          const key = performanceRowKey(row);
+          const target = byKey.get(key);
+          if (target) {
+            for (const goal of chunk) {
+              target[`Conversions_${goal}_AUTO`] = row[`Conversions_${goal}_AUTO`];
+              target[`CostPerConversion_${goal}_AUTO`] = row[`CostPerConversion_${goal}_AUTO`];
+            }
+            continue;
+          }
+          const added: SearchQueryRow = {
+            Date: row.Date,
+            CampaignId: row.CampaignId,
+            CampaignName: row.CampaignName,
+            CampaignType: row.CampaignType,
+            AdNetworkType: row.AdNetworkType,
+            Impressions: 0,
+            Clicks: 0,
+            Cost: 0,
+          };
+          for (const goal of chunk) {
+            added[`Conversions_${goal}_AUTO`] = row[`Conversions_${goal}_AUTO`];
+            added[`CostPerConversion_${goal}_AUTO`] = row[`CostPerConversion_${goal}_AUTO`];
+          }
+          base.push(added);
+          byKey.set(key, added);
+        }
+      }
+      return base;
     },
   };
 }
