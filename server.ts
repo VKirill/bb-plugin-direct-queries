@@ -39,7 +39,8 @@ import {
   type AccountRow,
 } from "./db.ts";
 import { createSecrets, type SecretName } from "./secrets.ts";
-import { runLibrarySync, runPipeline, type PipelineDeps } from "./pipeline.ts";
+import { maskText, runLibrarySync, runPipeline, type PipelineDeps } from "./pipeline.ts";
+import { listChanges, syncDirectChanges, withHistory } from "./history.ts";
 import { runWeeklyTree } from "./weekly-tree.ts";
 import { runStatsSheet } from "./stats-sheet.ts";
 import {
@@ -105,6 +106,23 @@ const ohmyseoAccountSchema = z.object({
   isDefault: z.boolean(),
   denied: z.boolean(),
   imported: z.boolean(),
+});
+
+const changeRowSchema = z.object({
+  id: z.number().int(),
+  at: z.string(),
+  accountId: z.string(),
+  clientLogin: z.string().optional(),
+  source: z.enum(["job", "rpc", "cli", "agent", "direct"]),
+  actor: z.string(),
+  objectType: z.enum(["campaign", "ad_group", "keyword", "shared_set", "ad"]),
+  objectId: z.string(),
+  campaignId: z.number().optional(),
+  adGroupId: z.number().optional(),
+  field: z.string(),
+  before: z.unknown(),
+  after: z.unknown(),
+  note: z.string().optional(),
 });
 
 const passportViewSchema = z.object({
@@ -209,6 +227,30 @@ export const rpcContract = defineRpcContract({
   "pipeline.preview": {
     input: z.object({ projectId: z.string(), day: z.string().optional() }),
     output: z.object({ runId: z.string(), day: z.string() }),
+  },
+  history: {
+    input: z.object({
+      accountId: z.string().optional(),
+      since: z.string().optional(),
+      source: z.enum(["job", "rpc", "cli", "agent", "direct"]).optional(),
+      limit: z.number().int().min(1).max(1000).optional(),
+      before: z.object({ at: z.string(), id: z.number().int() }).optional(),
+    }),
+    output: z.array(changeRowSchema),
+  },
+  historySync: {
+    input: z.object({ accountId: z.string().optional() }),
+    output: z.object({
+      results: z.array(
+        z.object({
+          accountId: z.string(),
+          clientLogin: z.string().optional(),
+          added: z.number(),
+          skipped: z.number(),
+          error: z.string().optional(),
+        }),
+      ),
+    }),
   },
 });
 
@@ -359,8 +401,13 @@ function liveDeps(
       });
       return sheets.publishDay(sheetId, date, rows);
     },
-    syncLibrary: async ({ apply, approved, account, clientLogin }) => {
-      const client = await directClientFor(account, clientLogin);
+    syncLibrary: async ({ apply, approved, account, clientLogin, origin }) => {
+      const client = withHistory(await directClientFor(account, clientLogin), {
+        db,
+        accountId: account.id,
+        clientLogin,
+        origin: origin ?? { source: "job", actor: "unknown" },
+      });
       const campaigns = await client.campaigns();
       const ids = campaigns.map((c) => c.Id);
       const groups = ids.length ? await client.adGroups(ids) : [];
@@ -369,8 +416,13 @@ function liveDeps(
       const plan = planLibrarySync({ campaigns, groups, sharedSets, keywords, approved });
       return applyLibrarySync(client, plan, { apply });
     },
-    applyNegatives: async ({ level, apply, approved, account, clientLogin }) => {
-      const client = await directClientFor(account, clientLogin);
+    applyNegatives: async ({ level, apply, approved, account, clientLogin, origin }) => {
+      const client = withHistory(await directClientFor(account, clientLogin), {
+        db,
+        accountId: account.id,
+        clientLogin,
+        origin: origin ?? { source: "job", actor: "unknown" },
+      });
       const campaigns = await client.campaigns();
       const ids = campaigns.map((c) => c.Id);
       const groups = ids.length ? await client.adGroups(ids) : [];
@@ -413,8 +465,13 @@ function liveDeps(
       const client = await directClientFor(account, clientLogin);
       return client.campaignExcludedSites(campaignIds);
     },
-    updateExcludedSites: async ({ account, clientLogin, items }) => {
-      const client = await directClientFor(account, clientLogin);
+    updateExcludedSites: async ({ account, clientLogin, items, origin }) => {
+      const client = withHistory(await directClientFor(account, clientLogin), {
+        db,
+        accountId: account.id,
+        clientLogin,
+        origin: origin ?? { source: "job", actor: "unknown" },
+      });
       return client.updateExcludedSites(items.map((i) => ({ id: i.campaignId, sites: i.sites })));
     },
     listDirectInventory: async ({ account, clientLogin }) => {
@@ -680,7 +737,16 @@ export default async function plugin(bb: BbPluginApi) {
     { auth: "none" },
   );
 
-  const { ohmyseoAccounts, ohmyseoImport, passportGet, passportSet, analytics, ...mainRpcContract } = rpcContract;
+  const {
+    ohmyseoAccounts,
+    ohmyseoImport,
+    passportGet,
+    passportSet,
+    analytics,
+    history,
+    historySync,
+    ...mainRpcContract
+  } = rpcContract;
 
   bb.rpc.register({ ohmyseoAccounts, ohmyseoImport }, {
     ohmyseoAccounts: async () => {
@@ -719,6 +785,79 @@ export default async function plugin(bb: BbPluginApi) {
       bb.realtime.publish("changed", { accounts: true });
       return { imported };
     },
+  });
+
+  const runHistorySync = async (accountId?: string) => {
+    await ensureSeed();
+    const targets = new Map<string, { accountId: string; clientLogin?: string }>();
+    const add = (accId: string, clientLogin?: string) => {
+      if (accountId !== undefined && accId !== accountId) return;
+      const key = `${accId}|${clientLogin ?? ""}`;
+      if (!targets.has(key)) targets.set(key, { accountId: accId, clientLogin });
+    };
+    for (const p of await projects()) {
+      if (!p.pipeline) continue;
+      add(p.pipeline.accountId, p.pipeline.clientLogin);
+    }
+    const results: Array<{
+      accountId: string;
+      clientLogin?: string;
+      added: number;
+      skipped: number;
+      error?: string;
+    }> = [];
+    let added = 0;
+    for (const a of listAccounts(db)) {
+      if (accountId !== undefined && a.id !== accountId) continue;
+      if (!a.isAgency) {
+        add(a.id);
+        continue;
+      }
+      try {
+        const direct = await directFor(a.id);
+        for (const client of await direct.agencyClients()) {
+          add(a.id, client.Login);
+        }
+      } catch (e) {
+        results.push({
+          accountId: a.id,
+          added: 0,
+          skipped: 0,
+          error: maskText(e instanceof Error ? e.message : String(e)).slice(0, 400),
+        });
+      }
+    }
+    for (const target of targets.values()) {
+      try {
+        const client = await directFor(target.accountId, target.clientLogin);
+        const r = await syncDirectChanges(client, db, {
+          accountId: target.accountId,
+          clientLogin: target.clientLogin,
+        });
+        added += r.added;
+        results.push({
+          accountId: target.accountId,
+          clientLogin: target.clientLogin,
+          added: r.added,
+          skipped: r.skipped,
+        });
+      } catch (e) {
+        results.push({
+          accountId: target.accountId,
+          clientLogin: target.clientLogin,
+          added: 0,
+          skipped: 0,
+          error: maskText(e instanceof Error ? e.message : String(e)).slice(0, 400),
+        });
+      }
+    }
+    if (added > 0) bb.realtime.publish("changed", { history: true });
+    return { results };
+  };
+
+  bb.rpc.register({ history, historySync }, {
+    history: (input) => serial(() => listChanges(db, input)),
+    historySync: (input) => serial(() => runHistorySync(input.accountId)),
   });
 
   bb.rpc.register({ passportGet, passportSet }, {
@@ -762,7 +901,10 @@ export default async function plugin(bb: BbPluginApi) {
       }),
     "ledger.list": ({ projectId, day, limit }) =>
       serial(() => runner.ledger(projectId, day, limit)),
-    run: ({ projectId, jobId, day }) => serial(() => runner.start(projectId, jobId, day, "manual")),
+    run: ({ projectId, jobId, day }) =>
+      serial(() =>
+        runner.start(projectId, jobId, day, "manual", false, { source: "rpc", actor: "run" }),
+      ),
     "stage.tail": async ({ runId, stageId, lines }) => {
       const run = await findRun(runId);
       if (!run) throw new Error("runMissing");
@@ -796,12 +938,27 @@ export default async function plugin(bb: BbPluginApi) {
     "oauth.redirectUri": async () => ({ uri: oauthRedirectUri(bb) }),
     "secrets.status": async () => secrets.status(),
     "pipeline.run": ({ projectId, day, dryRun }) =>
-      serial(() => runner.start(projectId, "night-export", day, "manual", dryRun)),
+      serial(() =>
+        runner.start(projectId, "night-export", day, "manual", dryRun, {
+          source: "rpc",
+          actor: "pipeline.run",
+        }),
+      ),
     "pipeline.preview": ({ projectId, day }) =>
-      serial(() => runner.start(projectId, "night-export", day, "manual", true)),
+      serial(() =>
+        runner.start(projectId, "night-export", day, "manual", true, {
+          source: "rpc",
+          actor: "pipeline.preview",
+        }),
+      ),
   });
 
   bb.background.schedule("tick", "* * * * *", () => serial(() => runner.tick()));
+  bb.background.schedule("history-sync", "0 * * * *", () =>
+    serial(async () => {
+      await runHistorySync();
+    }),
+  );
 
   bb.cli.register({
     name: "direct-queries",
@@ -853,6 +1010,11 @@ export default async function plugin(bb: BbPluginApi) {
         usage:
           "bb direct-queries stats <account> --from YYYY-MM-DD --to YYYY-MM-DD [--client-login L] [--goals id,id] [--json]",
       },
+      {
+        name: "history",
+        summary: "List recorded changes of Direct accounts",
+        usage: "bb direct-queries history [<account>] [--since YYYY-MM-DD] [--json]",
+      },
     ],
     run: async (argv) => {
       try {
@@ -872,7 +1034,14 @@ export default async function plugin(bb: BbPluginApi) {
           case "run": {
             const dateI = argv.indexOf("--date");
             const day = dateI === -1 ? undefined : argv[dateI + 1];
-            const r = await serial(() => runner.start(argv[1] ?? "", argv[2] ?? "", day, "manual"));
+            const actorI = argv.indexOf("--actor");
+            const agent = actorI === -1 ? undefined : argv[actorI + 1];
+            const origin = agent
+              ? { source: "agent" as const, actor: agent }
+              : { source: "cli" as const, actor: "run" };
+            const r = await serial(() =>
+              runner.start(argv[1] ?? "", argv[2] ?? "", day, "manual", false, origin),
+            );
             return { exitCode: 0, stdout: JSON.stringify(r) };
           }
           case "pipeline": {
@@ -884,10 +1053,60 @@ export default async function plugin(bb: BbPluginApi) {
             }
             const dateI = argv.indexOf("--date");
             const day = dateI === -1 ? undefined : argv[dateI + 1];
+            const actorI = argv.indexOf("--actor");
+            const agent = actorI === -1 ? undefined : argv[actorI + 1];
+            const origin = agent
+              ? { source: "agent" as const, actor: agent }
+              : { source: "cli" as const, actor: "pipeline run" };
             const r = await serial(() =>
-              runner.start(argv[2] ?? "", "night-export", day, "manual", argv.includes("--dry-run")),
+              runner.start(
+                argv[2] ?? "",
+                "night-export",
+                day,
+                "manual",
+                argv.includes("--dry-run"),
+                origin,
+              ),
             );
             return { exitCode: 0, stdout: JSON.stringify(r) };
+          }
+          case "history": {
+            const sinceI = argv.indexOf("--since");
+            const since = sinceI === -1 ? undefined : argv[sinceI + 1];
+            const positional: string[] = [];
+            for (let i = 1; i < argv.length; i += 1) {
+              const a = argv[i];
+              if (a === "--since" || a === "--actor") {
+                i += 1;
+                continue;
+              }
+              if (a.startsWith("--")) continue;
+              positional.push(a);
+            }
+            const rows = [];
+            let before: { at: string; id: number } | undefined;
+            for (;;) {
+              const page = listChanges(db, {
+                accountId: positional[0],
+                since,
+                limit: 1000,
+                before,
+              });
+              rows.push(...page);
+              if (page.length < 1000) break;
+              const last = page[page.length - 1];
+              before = { at: last.at, id: last.id };
+            }
+            if (argv.includes("--json")) {
+              return { exitCode: 0, stdout: JSON.stringify(rows) };
+            }
+            const fmt = (v: unknown): string =>
+              v === null || v === undefined ? "—" : typeof v === "string" ? v : JSON.stringify(v);
+            const lines = rows.map(
+              (r) =>
+                `${r.at} ${r.source}/${r.actor} ${r.accountId} ${r.objectType}:${r.objectId} ${r.field} ${fmt(r.before)} → ${fmt(r.after)}`,
+            );
+            return { exitCode: 0, stdout: lines.join("\n") };
           }
           case "enable":
           case "disable": {
@@ -1058,7 +1277,7 @@ export default async function plugin(bb: BbPluginApi) {
             return {
               exitCode: 0,
               stdout:
-                "bb direct-queries status [--json] | run <project> <job> [--date D] | pipeline run <project> [--date D] [--dry-run] | enable|disable <project> [job] | morning [--dry-run|--send] | import <file> | export | passport get <project> [--json] | passport set <project> --file <path> | stats <account> --from D --to D [--client-login L] [--goals id,id] [--json]",
+                "bb direct-queries status [--json] | run <project> <job> [--date D] | pipeline run <project> [--date D] [--dry-run] | enable|disable <project> [job] | morning [--dry-run|--send] | import <file> | export | passport get <project> [--json] | passport set <project> --file <path> | stats <account> --from D --to D [--client-login L] [--goals id,id] [--json] | history [<account>] [--since D] [--json]",
             };
         }
       } catch (e) {

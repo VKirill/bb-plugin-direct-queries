@@ -28,6 +28,7 @@ import type {
 } from "./sheets.ts";
 import type { SearchQueryRow } from "./direct.ts";
 import type { PhraseSuggestion } from "./negatives.ts";
+import type { ChangeOrigin } from "./history.ts";
 
 export type Trigger = "schedule" | "catch-up" | "manual";
 
@@ -35,7 +36,7 @@ const MSK_SERP_END = 6;
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 
-const maskText = (s: string): string =>
+export const maskText = (s: string): string =>
   s
     .replace(/\b(token|key|password|secret)\b\s*[:=]\s*\S+/gi, "$1=***")
     .replace(/\bBearer\s+\S+/gi, "Bearer ***");
@@ -77,6 +78,7 @@ export type PipelineDeps = {
     approved: ApprovedPhrase[];
     account: AccountRow;
     clientLogin?: string;
+    origin?: ChangeOrigin;
   }) => Promise<{ added: number; created: number }>;
   applyNegatives?: (args: {
     level: ApplyNegativesLevel;
@@ -84,6 +86,7 @@ export type PipelineDeps = {
     approved: ApprovedNegative[];
     account: AccountRow;
     clientLogin?: string;
+    origin?: ChangeOrigin;
   }) => Promise<NegativesResult>;
   refreshLibraryColumn?: (sheetId: string, inLibrary: (query: string) => boolean) => Promise<void>;
   placementsReport?: (args: {
@@ -106,6 +109,7 @@ export type PipelineDeps = {
     account: AccountRow;
     clientLogin?: string;
     items: { campaignId: number; sites: string[] }[];
+    origin?: ChangeOrigin;
   }) => Promise<unknown>;
   listDirectInventory?: (args: {
     account: AccountRow;
@@ -233,7 +237,13 @@ export async function runPipeline(
   deps: PipelineDeps,
   project: Project,
   day: string,
-  opts: { trigger: Trigger; dryRun?: boolean; runId?: string; attempt?: number },
+  opts: {
+    trigger: Trigger;
+    dryRun?: boolean;
+    runId?: string;
+    attempt?: number;
+    origin?: ChangeOrigin;
+  },
 ): Promise<LedgerRow[]> {
   if (!project.pipeline) throw new Error("pipelineMissing");
   nightRunning.add(project.id);
@@ -248,7 +258,13 @@ async function runPipelineInner(
   deps: PipelineDeps,
   project: Project,
   day: string,
-  opts: { trigger: Trigger; dryRun?: boolean; runId?: string; attempt?: number },
+  opts: {
+    trigger: Trigger;
+    dryRun?: boolean;
+    runId?: string;
+    attempt?: number;
+    origin?: ChangeOrigin;
+  },
 ): Promise<LedgerRow[]> {
   const pipe = project.pipeline;
   if (!pipe) throw new Error("pipelineMissing");
@@ -260,6 +276,7 @@ async function runPipelineInner(
     attempt: opts.attempt ?? 1,
     trigger: opts.trigger,
   };
+  const origin = opts.origin ?? { source: "job" as const, actor: `${project.id}/${ctx.jobId}` };
   const dryRun = opts.dryRun === true;
   const rows: LedgerRow[] = [];
   let directAccount: AccountRow | undefined;
@@ -513,6 +530,7 @@ async function runPipelineInner(
           approved: approvedNegatives(feedbackRows, queries),
           account: directAccount!,
           clientLogin: pipe.clientLogin,
+          origin,
         });
         const planned =
           result.campaigns.reduce((n, c) => n + c.added.length, 0) +
@@ -539,6 +557,7 @@ async function runPipelineInner(
         approved,
         account: directAccount!,
         clientLogin: pipe.clientLogin,
+        origin,
       });
       return {
         rowsOut: result.added + result.created,
@@ -623,6 +642,7 @@ async function runPipelineInner(
               account: directAccount!,
               clientLogin: pipe.clientLogin,
               items: updates,
+              origin,
             });
           } else {
             notes.push("updateExcludedSites not wired");
@@ -647,7 +667,7 @@ async function runPipelineInner(
 export async function runLibrarySync(
   deps: PipelineDeps,
   project: Project,
-  opts: { runId?: string; attempt?: number; dryRun?: boolean } = {},
+  opts: { runId?: string; attempt?: number; dryRun?: boolean; origin?: ChangeOrigin } = {},
 ): Promise<LedgerRow[]> {
   const pipe = project.pipeline;
   if (!pipe) throw new Error("pipelineMissing");
@@ -660,6 +680,7 @@ export async function runLibrarySync(
     attempt: opts.attempt ?? 1,
     trigger: "schedule",
   };
+  const origin = opts.origin ?? { source: "job" as const, actor: `${project.id}/${ctx.jobId}` };
   const startedAt = iso(deps.now());
   try {
     if (isNightExportRunning(project.id)) {
@@ -690,6 +711,7 @@ export async function runLibrarySync(
       approved,
       account: fresh,
       clientLogin: pipe.clientLogin,
+      origin,
     });
     return [
       stageRow(ctx, "sync", startedAt, iso(deps.now()), "ok", {

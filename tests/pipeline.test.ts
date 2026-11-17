@@ -246,6 +246,33 @@ describe("runPipeline", () => {
     expect(lib.libraryApply).toEqual([]);
   });
 
+  it("passes the job origin by default and a given origin through to writes", async () => {
+    const origins: unknown[] = [];
+    const { deps } = fakes({
+      pullDecisions: async () => [
+        { query: "фильтр цех", campaign: "Search", decision: "minus", comment: "", date: "2026-11-03" },
+      ],
+      applyNegatives: async (args) => {
+        origins.push(args.origin);
+        return { campaigns: [], groups: [], keywords: [], skipped: [], errors: [], applied: args.apply };
+      },
+    });
+    const campaignProject = {
+      ...project,
+      pipeline: {
+        ...project.pipeline!,
+        negatives: { level: "campaign" as const, apply: true },
+      },
+    };
+    await runPipeline(deps, campaignProject, "2026-11-03", { trigger: "schedule" });
+    expect(origins).toEqual([{ source: "job", actor: "gamma/night-export" }]);
+    await runPipeline(deps, campaignProject, "2026-11-03", {
+      trigger: "manual",
+      origin: { source: "cli", actor: "run" },
+    });
+    expect(origins[1]).toEqual({ source: "cli", actor: "run" });
+  });
+
   it("negatives apply false plans without writes", async () => {
     const calls: { apply?: boolean }[] = [];
     const { deps } = fakes({

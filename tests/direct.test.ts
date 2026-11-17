@@ -121,7 +121,7 @@ describe("campaigns paging", () => {
     expect(bodies[1].params).toEqual({
       SelectionCriteria: { States: ["ON", "SUSPENDED", "OFF"] },
       FieldNames: ["Id", "Name", "State", "Status", "Type", "NegativeKeywords"],
-      Page: { Limit: 10000, LimitedBy: 10000 },
+      Page: { Limit: 10000, Offset: 10000 },
     });
   });
 });
@@ -146,6 +146,160 @@ describe("adGroups", () => {
     });
     expect(sizes).toEqual([10, 10, 5]);
     expect(calls[0].url).toBe("https://api.direct.yandex.com/json/v5/adgroups");
+  });
+});
+
+describe("id reads and changes service", () => {
+  const transportClient = (responses: unknown[]) => {
+    const calls: Array<{ service: string; method: string; params: unknown }> = [];
+    const queue = [...responses];
+    const client = createDirectClient({
+      transport: {
+        call: async (service: string, method: string, params: unknown) => {
+          calls.push({ service, method, params });
+          return queue.shift() ?? {};
+        },
+        report: async () => "",
+      },
+    });
+    return { client, calls };
+  };
+
+  it("adGroupsByIds and keywordsByIds post SelectionCriteria.Ids", async () => {
+    const { client, calls } = transportClient([
+      { AdGroups: [{ Id: 5, CampaignId: 1, Name: "G" }] },
+      { Keywords: [{ Id: 9, Keyword: "k", CampaignId: 1, AdGroupId: 5, State: "ON" }] },
+    ]);
+    const groups = await client.adGroupsByIds([5]);
+    const keywords = await client.keywordsByIds([9]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].service).toBe("adgroups");
+    expect(calls[0].method).toBe("get");
+    expect(calls[0].params).toEqual({
+      SelectionCriteria: { Ids: [5] },
+      FieldNames: ["Id", "CampaignId", "Name", "NegativeKeywordSharedSetIds", "NegativeKeywords"],
+      Page: { Limit: 10000 },
+    });
+    expect(groups[0].Id).toBe(5);
+    expect(calls[1].service).toBe("keywords");
+    expect(calls[1].params).toEqual({
+      SelectionCriteria: { Ids: [9] },
+      FieldNames: ["Id", "Keyword", "CampaignId", "AdGroupId", "State"],
+      Page: { Limit: 10000 },
+    });
+    expect(keywords[0].Keyword).toBe("k");
+  });
+
+  it("changesCheckCampaigns posts Timestamp to changes.checkCampaigns", async () => {
+    const { client, calls } = transportClient([
+      { Campaigns: [{ CampaignId: 1, ChangesIn: ["SELF"] }], Timestamp: "T2" },
+    ]);
+    const res = await client.changesCheckCampaigns("T1");
+    expect(calls).toEqual([
+      { service: "changes", method: "checkCampaigns", params: { Timestamp: "T1" } },
+    ]);
+    expect(res.Timestamp).toBe("T2");
+    expect(res.Campaigns).toEqual([{ CampaignId: 1, ChangesIn: ["SELF"] }]);
+  });
+
+  it("changesCheck batches campaign ids and merges Modified", async () => {
+    const { client, calls } = transportClient([
+      { Modified: { CampaignIds: [1], AdGroupIds: [2], AdIds: [] }, Timestamp: "T2" },
+      { Modified: { CampaignIds: [3], AdGroupIds: [], AdIds: [7] }, Timestamp: "T3" },
+    ]);
+    const ids = Array.from({ length: 3001 }, (_, i) => i + 1);
+    const res = await client.changesCheck({ campaignIds: ids, timestamp: "T1" });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual({
+      service: "changes",
+      method: "check",
+      params: {
+        CampaignIds: ids.slice(0, 3000),
+        FieldNames: ["CampaignIds", "AdGroupIds", "AdIds"],
+        Timestamp: "T1",
+      },
+    });
+    expect(calls[1].params).toEqual({
+      CampaignIds: [3001],
+      FieldNames: ["CampaignIds", "AdGroupIds", "AdIds"],
+      Timestamp: "T1",
+    });
+    expect(res.Modified).toEqual({
+      CampaignIds: [1, 3],
+      AdGroupIds: [2],
+      AdIds: [7],
+    });
+    expect(res.Timestamp).toBe("T2");
+    expect(res.Unprocessed).toEqual({ CampaignIds: [], AdGroupIds: [], AdIds: [] });
+  });
+
+  it("changesCheck re-asks unprocessed ids with the same Timestamp", async () => {
+    const { client, calls } = transportClient([
+      {
+        Modified: { CampaignIds: [], AdGroupIds: [], AdIds: [] },
+        Unprocessed: { CampaignIds: [10], AdGroupIds: [], AdIds: [] },
+        Timestamp: "T2",
+      },
+      {
+        Modified: { CampaignIds: [10], AdGroupIds: [], AdIds: [] },
+        Timestamp: "T2",
+      },
+    ]);
+    const res = await client.changesCheck({ campaignIds: [10, 11], timestamp: "T1" });
+    expect(calls).toHaveLength(2);
+    expect(calls[0].params).toEqual({
+      CampaignIds: [10, 11],
+      FieldNames: ["CampaignIds", "AdGroupIds", "AdIds"],
+      Timestamp: "T1",
+    });
+    expect(calls[1].params).toEqual({
+      CampaignIds: [10],
+      FieldNames: ["CampaignIds", "AdGroupIds", "AdIds"],
+      Timestamp: "T1",
+    });
+    expect(res.Modified.CampaignIds).toContain(10);
+    expect(res.Unprocessed).toEqual({ CampaignIds: [], AdGroupIds: [], AdIds: [] });
+    expect(res.Timestamp).toBe("T2");
+  });
+
+  it("changesCheck returns leftover Unprocessed after 3 asks", async () => {
+    const stuck = {
+      Modified: { CampaignIds: [], AdGroupIds: [], AdIds: [] },
+      Unprocessed: { CampaignIds: [10], AdGroupIds: [], AdIds: [] },
+      Timestamp: "T2",
+    };
+    const { client, calls } = transportClient([stuck, stuck, stuck]);
+    const res = await client.changesCheck({ campaignIds: [10], timestamp: "T1" });
+    expect(calls).toHaveLength(3);
+    expect(res.Unprocessed.CampaignIds).toEqual([10]);
+  });
+
+  it("agencyClients follows LimitedBy across pages", async () => {
+    const { client, calls } = transportClient([
+      { Clients: [{ Login: "client-a" }], LimitedBy: 1 },
+      { Clients: [{ Login: "client-b" }] },
+    ]);
+    const clients = await client.agencyClients();
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual({
+      service: "agencyclients",
+      method: "get",
+      params: {
+        SelectionCriteria: {},
+        FieldNames: ["Login", "ClientInfo"],
+        Page: { Limit: 10000 },
+      },
+    });
+    expect(calls[1]).toEqual({
+      service: "agencyclients",
+      method: "get",
+      params: {
+        SelectionCriteria: {},
+        FieldNames: ["Login", "ClientInfo"],
+        Page: { Limit: 10000, Offset: 1 },
+      },
+    });
+    expect(clients).toEqual([{ Login: "client-a" }, { Login: "client-b" }]);
   });
 });
 

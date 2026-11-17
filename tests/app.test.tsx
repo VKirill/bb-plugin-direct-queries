@@ -4,6 +4,7 @@ import { createElement } from "react";
 
 const calls: Array<{ method: string; input: unknown }> = [];
 const routes: Record<string, (input: unknown) => unknown> = {};
+const realtime: Record<string, () => void> = {};
 
 vi.mock("@get-bb/plugin-sdk/app", () => ({
   definePluginApp: (setup: (app: { slots: { navPanel: (d: { component: unknown }) => void } }) => void) => {
@@ -17,7 +18,9 @@ vi.mock("@get-bb/plugin-sdk/app", () => ({
       return routes[method]?.(input);
     },
   }),
-  useRealtime: () => undefined,
+  useRealtime: (event: string, fn: () => void) => {
+    realtime[event] = fn;
+  },
   experimental_usePluginId: () => "direct-queries",
   experimental_copyToClipboard: async () => true,
 }));
@@ -72,6 +75,7 @@ const analyticsResult = (campaignName: string, cost: number) => ({
 
 beforeEach(() => {
   calls.length = 0;
+  for (const key of Object.keys(realtime)) delete realtime[key];
   document.documentElement.lang = "en";
   document.documentElement.removeAttribute("data-pk-lang");
   document.body.innerHTML = "";
@@ -86,6 +90,9 @@ beforeEach(() => {
   ];
   routes.run = async () => ({ runId: "r2", day: "2026-11-03" });
   routes["projects.list"] = async () => [];
+  routes.history = async () => [];
+  routes["accounts.list"] = async () => [];
+  routes.historySync = async () => ({ results: [] });
   routes["settings.get"] = async () => ({ morningLine: { enabled: true, hostId: "h", command: "c {file}", hour: 9 }, timeZone: "Europe/Moscow" });
 });
 
@@ -320,5 +327,156 @@ describe("dashboard", () => {
         document.querySelector('.dq-tabs button:nth-child(3)')?.getAttribute("aria-pressed"),
       ).toBe("true"),
     );
+  });
+});
+
+describe("change history tab", () => {
+  it("shows the table headers after loading", async () => {
+    routes.history = async () => [
+      {
+        id: 1,
+        at: "2026-11-16T12:00:00.000Z",
+        accountId: "acc-1",
+        source: "direct",
+        actor: "direct",
+        objectType: "campaign",
+        objectId: "10",
+        campaignId: 10,
+        field: "Name",
+        before: "Old",
+        after: "New",
+      },
+    ];
+    render(createElement(Page));
+    fireEvent.click(await screen.findByRole("button", { name: "Change history" }));
+    const headers = await screen.findAllByRole("columnheader");
+    expect(headers.map((h) => h.textContent)).toEqual([
+      "Time",
+      "Source",
+      "Object",
+      "Field",
+      "Before",
+      "After",
+    ]);
+    expect(await screen.findByText("campaign:10")).toBeTruthy();
+    expect(screen.getByText("Old")).toBeTruthy();
+    expect(screen.getByText("New")).toBeTruthy();
+  });
+
+  it("a rejected history RPC shows the error and Retry recovers", async () => {
+    let fail = true;
+    routes.history = async () => {
+      if (fail) throw new Error("history down");
+      return [];
+    };
+    render(createElement(Page));
+    fireEvent.click(await screen.findByRole("button", { name: "Change history" }));
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(screen.getByText("history down")).toBeTruthy();
+    fail = false;
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.getAllByRole("columnheader")).toHaveLength(6));
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("shows per-account historySync errors after Refresh", async () => {
+    routes.historySync = async () => ({
+      results: [
+        { accountId: "acc-1", clientLogin: undefined, added: 0, skipped: 0, error: "direct read failed" },
+      ],
+    });
+    render(createElement(Page));
+    fireEvent.click(await screen.findByRole("button", { name: "Change history" }));
+    await screen.findAllByRole("columnheader");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh from Direct" }));
+    expect(await screen.findByText("direct read failed")).toBeTruthy();
+    await screen.findAllByRole("columnheader");
+  });
+
+  it("Refresh calls historySync then reloads history", async () => {
+    render(createElement(Page));
+    fireEvent.click(await screen.findByRole("button", { name: "Change history" }));
+    await screen.findAllByRole("columnheader");
+    calls.length = 0;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh from Direct" }));
+    await waitFor(() =>
+      expect(calls.map((c) => c.method)).toEqual(
+        expect.arrayContaining(["historySync", "history"]),
+      ),
+    );
+  });
+
+  const historyRow = (id: number, minute: number) => ({
+    id,
+    at: new Date(Date.parse("2026-11-16T00:00:00Z") + minute * 60_000).toISOString(),
+    accountId: "acc-1",
+    source: "direct",
+    actor: "direct",
+    objectType: "campaign",
+    objectId: String(id),
+    campaignId: id,
+    field: "Name",
+    before: "Old",
+    after: "New",
+  });
+  const firstPage = Array.from({ length: 200 }, (_, i) => historyRow(1000 - i, i));
+  const olderPage = Array.from({ length: 5 }, (_, i) => historyRow(800 - i, 200 + i));
+  const bodyRows = () => document.querySelectorAll("tbody tr");
+
+  it("Load older sends the last row's cursor and appends the next page", async () => {
+    routes.history = async (input) =>
+      (input as { before?: unknown } | undefined)?.before ? olderPage : firstPage;
+    render(createElement(Page));
+    fireEvent.click(await screen.findByRole("button", { name: "Change history" }));
+    await waitFor(() => expect(bodyRows()).toHaveLength(200));
+    const older = await screen.findByRole("button", { name: "Load older" });
+    fireEvent.click(older);
+    await waitFor(() => expect(bodyRows()).toHaveLength(205));
+    const lastCall = calls.filter((c) => c.method === "history").at(-1);
+    const input = lastCall?.input as {
+      limit: number;
+      before: { at: string; id: number };
+    };
+    const lastRow = firstPage[firstPage.length - 1];
+    expect(input.limit).toBe(200);
+    expect(input.before).toEqual({ at: lastRow.at, id: lastRow.id });
+    expect(screen.queryByRole("button", { name: "Load older" })).toBeNull();
+    const historyCalls = calls.filter((c) => c.method === "history").length;
+    await act(async () => {
+      realtime.changed?.();
+    });
+    expect(calls.filter((c) => c.method === "history")).toHaveLength(historyCalls);
+    expect(bodyRows()).toHaveLength(205);
+  });
+
+  it("drops a stale Load older response after a filter change", async () => {
+    let resolveOlder: ((value: unknown) => void) | undefined;
+    routes.history = (input) => {
+      const before = (input as { before?: unknown } | undefined)?.before;
+      if (!before) return Promise.resolve(firstPage);
+      return new Promise((resolve) => {
+        resolveOlder = resolve;
+      });
+    };
+    render(createElement(Page));
+    fireEvent.click(await screen.findByRole("button", { name: "Change history" }));
+    await waitFor(() => expect(bodyRows()).toHaveLength(200));
+    fireEvent.click(screen.getByRole("button", { name: "Load older" }));
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (c) =>
+            c.method === "history" &&
+            (c.input as { before?: unknown }).before !== undefined,
+        ),
+      ).toBe(true),
+    );
+    const selects = screen.getAllByRole("combobox");
+    fireEvent.change(selects[1], { target: { value: "direct" } });
+    await waitFor(() => expect(bodyRows()).toHaveLength(200));
+    await act(async () => {
+      resolveOlder?.(olderPage);
+    });
+    expect(bodyRows()).toHaveLength(200);
   });
 });

@@ -42,6 +42,33 @@ describe("db migrations", () => {
       expect.arrayContaining(["accounts", "oauth_states", "queries", "judgements", "feedback", "cache"]),
     );
   });
+
+  it("creates change_history with all columns, idempotently", () => {
+    const db = open();
+    applyMigrations(db);
+    applyMigrations(db);
+    const cols = db.prepare(`PRAGMA table_info(change_history)`).all() as Array<{ name: string }>;
+    expect(cols.map((c) => c.name)).toEqual([
+      "id",
+      "at",
+      "account_id",
+      "client_login",
+      "source",
+      "actor",
+      "object_type",
+      "object_id",
+      "campaign_id",
+      "ad_group_id",
+      "field",
+      "before",
+      "after",
+      "note",
+    ]);
+    const indexes = db
+      .prepare(`PRAGMA index_list(change_history)`)
+      .all() as Array<{ name: string }>;
+    expect(indexes.map((i) => i.name)).toContain("change_history_account_at");
+  });
 });
 
 describe("cache port", () => {

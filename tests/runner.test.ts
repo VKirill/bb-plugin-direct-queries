@@ -350,6 +350,34 @@ describe("built-in pipeline schedule", () => {
     expect(started).toEqual(["gamma:2026-11-04", "gamma:2026-11-04"]);
   });
 
+  it("start passes origin into pipeline.run opts", async () => {
+    const store = new MemStore();
+    const host = new FakeHost();
+    const seen: unknown[] = [];
+    seq = 0;
+    const runner = createRunner({
+      store,
+      host,
+      now: () => currentNow,
+      newRunId: () => `run-${++seq}`,
+      pipeline: {
+        run: async (project, day, opts) => {
+          seen.push(opts.origin);
+          return [] as LedgerRow[];
+        },
+        sync: async () => [],
+      },
+    });
+    await store.set("projects", [fixturePipelineProject()]);
+    await store.set("settings", fixtureSettings());
+    at(T0300);
+    await runner.start("gamma", "night-export", "2026-11-03", "manual", false, {
+      source: "cli",
+      actor: "run",
+    });
+    expect(seen).toEqual([{ source: "cli", actor: "run" }]);
+  });
+
   it("a job id in pipeline.jobs runs its handler instead of pipeline.run", async () => {
     const store = new MemStore();
     const host = new FakeHost();
