@@ -5,7 +5,7 @@ import type {
   NegativesResult,
 } from "./apply-negatives.ts";
 import { phrase, phraseKey, type ApprovedPhrase } from "./library.ts";
-import type { Feedback, JudgeItem, JudgeResult, SiteProfile } from "./judge.ts";
+import type { CachePort, Feedback, JudgeItem, JudgeResult, SiteProfile } from "./judge.ts";
 import { negativesConfig, type LedgerRow, type Project, type ProjectPipeline } from "./model.ts";
 import { negativeCandidates, suggestPhrases, type AuditRow } from "./negatives.ts";
 import {
@@ -116,6 +116,13 @@ export type PipelineDeps = {
     sharedSets: import("./direct.ts").SharedSet[];
     keywords: import("./direct.ts").Keyword[];
   }>;
+  weeklyCache?: CachePort;
+  publishWeeklyTree?: (
+    sheetId: string,
+    header: string[],
+    rows: (string | number)[][],
+    groups: { start: number; end: number; depth: number }[],
+  ) => Promise<void>;
 };
 
 type RunCtx = {
@@ -192,14 +199,14 @@ const approvedNegatives = (feedback: FeedbackRow[], queries: QueryRow[]): Approv
   return out;
 };
 
-async function campaignIdsFor(
+export async function campaignIdsFor(
   deps: PipelineDeps,
   pipe: ProjectPipeline,
   account: AccountRow,
 ): Promise<number[] | undefined> {
   const filter = pipe.campaignFilter;
   if (!filter) return undefined;
-  let ids = filter.ids?.slice();
+  let ids = filter.ids?.length ? filter.ids.slice() : undefined;
   if (filter.nameContains && deps.listCampaigns) {
     const all = await deps.listCampaigns({ account, clientLogin: pipe.clientLogin });
     const needle = filter.nameContains.toLowerCase();
@@ -209,7 +216,35 @@ async function campaignIdsFor(
   return ids;
 }
 
+// undefined means no campaign filter is configured (unrestricted); an empty
+// array means the configured selection matched nothing and must not fall back
+// to an unfiltered report.
+export function campaignSelectionEmpty(ids: number[] | undefined): boolean {
+  return ids !== undefined && ids.length === 0;
+}
+
+const nightRunning = new Set<string>();
+
+export function isNightExportRunning(projectId: string): boolean {
+  return nightRunning.has(projectId);
+}
+
 export async function runPipeline(
+  deps: PipelineDeps,
+  project: Project,
+  day: string,
+  opts: { trigger: Trigger; dryRun?: boolean; runId?: string; attempt?: number },
+): Promise<LedgerRow[]> {
+  if (!project.pipeline) throw new Error("pipelineMissing");
+  nightRunning.add(project.id);
+  try {
+    return await runPipelineInner(deps, project, day, opts);
+  } finally {
+    nightRunning.delete(project.id);
+  }
+}
+
+async function runPipelineInner(
   deps: PipelineDeps,
   project: Project,
   day: string,
@@ -269,6 +304,9 @@ export async function runPipeline(
       return { status: "reused" as const, rowsIn: 0, rowsOut: stored.length };
     }
     const ids = await campaignIdsFor(deps, pipe, directAccount!);
+    if (campaignSelectionEmpty(ids)) {
+      return { status: "no-shows" as const, rowsIn: 0, rowsOut: 0 };
+    }
     const raw = await deps.searchQueryReport({
       account: directAccount!,
       clientLogin: pipe.clientLogin,
@@ -624,6 +662,13 @@ export async function runLibrarySync(
   };
   const startedAt = iso(deps.now());
   try {
+    if (isNightExportRunning(project.id)) {
+      return [
+        stageRow(ctx, "sync", startedAt, startedAt, "skipped", {
+          firstError: "идёт ночная выгрузка",
+        }),
+      ];
+    }
     const account = deps.getAccount(pipe.accountId);
     if (!account) throw new Error(`account ${pipe.accountId} missing`);
     const fresh = await deps.ensureFresh(account);

@@ -128,6 +128,14 @@ export function createRunner(args: {
       project: Project,
       opts: { runId: string; attempt: number; dryRun?: boolean },
     ) => Promise<LedgerRow[]>;
+    jobs?: Record<
+      string,
+      (
+        project: Project,
+        day: string,
+        opts: { trigger: PipelineTrigger; dryRun?: boolean; runId: string; attempt: number },
+      ) => Promise<LedgerRow[]>
+    >;
   };
   sendTelegram?: (text: string) => Promise<void>;
 }) {
@@ -196,8 +204,10 @@ export function createRunner(args: {
     if (project.pipeline) {
       try {
         const opts = { trigger, dryRun, runId, attempt: run.attempt };
-        run.rows =
-          jobId === "library-sync"
+        const jobHandler = pipeline?.jobs?.[jobId];
+        run.rows = jobHandler
+          ? await jobHandler(project, day, opts)
+          : jobId === "library-sync"
             ? await (pipeline?.sync(project, opts) ?? Promise.reject(new Error("pipeline not wired")))
             : await (pipeline?.run(project, day, opts) ?? Promise.reject(new Error("pipeline not wired")));
         run.alive = false;

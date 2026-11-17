@@ -271,4 +271,66 @@ describe("runPipeline", () => {
     expect(library.status).toBe("ok");
     expect(library.firstError).toContain("plan only");
   });
+
+  it("an empty campaignFilter ids list reports the whole account", async () => {
+    const seen: (number[] | undefined)[] = [];
+    const { deps, calls } = fakes({
+      searchQueryReport: async (args) => {
+        seen.push(args.campaignIds);
+        return [reportRow()];
+      },
+    });
+    const emptyIds = {
+      ...project,
+      pipeline: { ...project.pipeline!, campaignFilter: { ids: [] } },
+    };
+    const rows = await runPipeline(deps, emptyIds, "2026-11-03", { trigger: "schedule" });
+    expect(seen).toEqual([undefined]);
+    expect(calls.publish).toBe(1);
+    expect(rows.find((r) => r.stageId === "report")?.status).toBe("ok");
+  });
+
+  it("a campaignFilter nameContains that matches nothing skips the report", async () => {
+    let reportCalls = 0;
+    const { deps, calls } = fakes({
+      listCampaigns: async () => [
+        { Id: 11, Name: "Search", State: "ACTIVE", Status: "ACCEPTED", Type: "TEXT_CAMPAIGN" },
+      ],
+      searchQueryReport: async () => {
+        reportCalls += 1;
+        return [reportRow()];
+      },
+    });
+    const noMatch = {
+      ...project,
+      pipeline: { ...project.pipeline!, campaignFilter: { nameContains: "nomatch" } },
+    };
+    const rows = await runPipeline(deps, noMatch, "2026-11-03", { trigger: "schedule" });
+    expect(reportCalls).toBe(0);
+    expect(calls.publish).toBe(0);
+    expect(rows.find((r) => r.stageId === "report")?.status).toBe("no-shows");
+  });
+
+  it("campaignFilter ids intersected with nameContains can match nothing", async () => {
+    let reportCalls = 0;
+    const { deps } = fakes({
+      listCampaigns: async () => [
+        { Id: 5, Name: "Alpha", State: "ACTIVE", Status: "ACCEPTED", Type: "TEXT_CAMPAIGN" },
+      ],
+      searchQueryReport: async () => {
+        reportCalls += 1;
+        return [reportRow()];
+      },
+    });
+    const empty = {
+      ...project,
+      pipeline: {
+        ...project.pipeline!,
+        campaignFilter: { ids: [5], nameContains: "x" },
+      },
+    };
+    const rows = await runPipeline(deps, empty, "2026-11-03", { trigger: "schedule" });
+    expect(reportCalls).toBe(0);
+    expect(rows.find((r) => r.stageId === "report")?.status).toBe("no-shows");
+  });
 });

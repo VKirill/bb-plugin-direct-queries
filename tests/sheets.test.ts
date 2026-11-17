@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { EvaluatedPlacement } from "../placements.ts";
 import { REVIEW_COLUMNS, type ReviewRow } from "../review.ts";
-import { createSheetsClient, PLACEMENT_COLUMNS } from "../sheets.ts";
+import { createSheetsClient, PLACEMENT_COLUMNS, WEEKLY_TREE_TAB } from "../sheets.ts";
 
 const jsonRes = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
@@ -304,5 +304,348 @@ describe("pullDecisions", () => {
         date: "2026-11-03",
       },
     ]);
+  });
+});
+
+describe("publishWeeklyTree", () => {
+  const header = Array.from({ length: 15 }, (_, i) => `h${i}`);
+  const rows: (string | number)[][] = [
+    ["w1", 1, 2, 3],
+    ["c1", 4, 5, 6],
+  ];
+  const weeklyMeta = {
+    spreadsheetId: "sheet_test",
+    sheets: [
+      {
+        properties: {
+          sheetId: 5,
+          title: WEEKLY_TREE_TAB,
+          index: 1,
+          gridProperties: { rowCount: 500, columnCount: 26 },
+        },
+        rowGroups: [
+          {
+            range: { sheetId: 5, dimension: "ROWS", startIndex: 2, endIndex: 8 },
+            depth: 1,
+            collapsed: true,
+          },
+        ],
+      },
+    ],
+  };
+
+  it("asks for gridProperties under properties and reads rowCount from there", async () => {
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.includes("oauth2.googleapis.com/token")) {
+        return jsonRes({ access_token: "tok", expires_in: 3600 });
+      }
+      calls.push({
+        method,
+        url,
+        body: init?.body ? (JSON.parse(String(init.body)) as unknown) : undefined,
+      });
+      if (method === "GET") return jsonRes(weeklyMeta);
+      return jsonRes({ replies: [] });
+    };
+    const client = createSheetsClient({
+      ...creds,
+      fetch: fetchFn,
+      sleep: async () => undefined,
+    });
+    await client.publishWeeklyTree("sheet_test", header, rows, [
+      { start: 2, end: 4, depth: 1 },
+    ]);
+
+    const get = calls.find((c) => c.method === "GET")!;
+    expect(decodeURIComponent(get.url)).toContain(
+      "fields=sheets(properties(sheetId,title,index,gridProperties(rowCount,columnCount)),rowGroups)",
+    );
+    const update = calls.find((c) => JSON.stringify(c.body ?? {}).includes("updateSheetProperties"))!;
+    const request = (update.body as { requests: { updateSheetProperties: { properties: { gridProperties: { rowCount: number; columnCount: number } } } }[] }).requests[0].updateSheetProperties;
+    expect(request.properties.gridProperties.rowCount).toBe(500);
+    expect(request.properties.gridProperties.columnCount).toBe(26);
+  });
+
+  it("replaces nested row groups with exact deleteDimensionGroup bodies, deepest first", async () => {
+    const nestedMeta = {
+      spreadsheetId: "sheet_test",
+      sheets: [
+        {
+          properties: {
+            sheetId: 5,
+            title: WEEKLY_TREE_TAB,
+            index: 1,
+            gridProperties: { rowCount: 500, columnCount: 26 },
+          },
+          rowGroups: [
+            {
+              range: { sheetId: 5, dimension: "ROWS", startIndex: 1, endIndex: 9 },
+              depth: 1,
+              collapsed: true,
+            },
+            {
+              range: { sheetId: 5, dimension: "ROWS", startIndex: 2, endIndex: 5 },
+              depth: 2,
+              collapsed: true,
+            },
+          ],
+        },
+      ],
+    };
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.includes("oauth2.googleapis.com/token")) {
+        return jsonRes({ access_token: "tok", expires_in: 3600 });
+      }
+      calls.push({
+        method,
+        url,
+        body: init?.body ? (JSON.parse(String(init.body)) as unknown) : undefined,
+      });
+      if (method === "GET") return jsonRes(nestedMeta);
+      return jsonRes({ replies: [] });
+    };
+    const client = createSheetsClient({
+      ...creds,
+      fetch: fetchFn,
+      sleep: async () => undefined,
+    });
+    await client.publishWeeklyTree("sheet_test", header, rows, [
+      { start: 2, end: 4, depth: 1 },
+    ]);
+
+    const groupBatch = calls
+      .map((c) => c.body)
+      .find(
+        (body) =>
+          Array.isArray((body as { requests?: unknown[] })?.requests) &&
+          (body as { requests: Record<string, unknown>[] }).requests.some((r) =>
+            Object.hasOwn(r, "deleteDimensionGroup"),
+          ),
+      ) as { requests: Record<string, unknown>[] };
+    expect(groupBatch.requests).toEqual([
+      {
+        deleteDimensionGroup: {
+          range: { sheetId: 5, dimension: "ROWS", startIndex: 2, endIndex: 5 },
+        },
+      },
+      {
+        deleteDimensionGroup: {
+          range: { sheetId: 5, dimension: "ROWS", startIndex: 1, endIndex: 9 },
+        },
+      },
+      {
+        addDimensionGroup: {
+          range: { sheetId: 5, dimension: "ROWS", startIndex: 2, endIndex: 4 },
+        },
+      },
+    ]);
+  });
+
+  it("refreshes the existing tab in place without deleting it", async () => {
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.includes("oauth2.googleapis.com/token")) {
+        return jsonRes({ access_token: "tok", expires_in: 3600 });
+      }
+      calls.push({
+        method,
+        url,
+        body: init?.body ? (JSON.parse(String(init.body)) as unknown) : undefined,
+      });
+      if (method === "GET") return jsonRes(weeklyMeta);
+      return jsonRes({ replies: [] });
+    };
+    const client = createSheetsClient({
+      ...creds,
+      fetch: fetchFn,
+      sleep: async () => undefined,
+    });
+    await client.publishWeeklyTree("sheet_test", header, rows, [
+      { start: 2, end: 4, depth: 1 },
+    ]);
+
+    const batchBodies = calls
+      .filter((c) => c.url.includes(":batchUpdate"))
+      .map((c) => JSON.stringify(c.body));
+    expect(batchBodies.some((b) => b.includes("deleteSheet"))).toBe(false);
+    const put = calls.find((c) => c.method === "PUT");
+    expect((put?.body as { values: unknown[][] }).values).toEqual([header, ...rows]);
+    const clear = calls.find((c) => c.url.includes(":clear"));
+    expect(clear).toBeDefined();
+    expect(decodeURIComponent(clear!.url)).toBe(
+      `https://sheets.googleapis.com/v4/spreadsheets/sheet_test/values/'${WEEKLY_TREE_TAB}':clear`,
+    );
+    expect(decodeURIComponent(put!.url)).toBe(
+      `https://sheets.googleapis.com/v4/spreadsheets/sheet_test/values/'${WEEKLY_TREE_TAB}'!A1?valueInputOption=RAW`,
+    );
+    const groupBatch = JSON.parse(batchBodies.at(-1)!) as {
+      requests: Record<string, unknown>[];
+    };
+    expect(groupBatch.requests.map((r) => Object.keys(r)[0])).toEqual([
+      "deleteDimensionGroup",
+      "addDimensionGroup",
+    ]);
+    expect(groupBatch.requests[0]).toEqual({
+      deleteDimensionGroup: {
+        range: { sheetId: 5, dimension: "ROWS", startIndex: 2, endIndex: 8 },
+      },
+    });
+    expect(groupBatch.requests[1]).toEqual({
+      addDimensionGroup: {
+        range: { sheetId: 5, dimension: "ROWS", startIndex: 2, endIndex: 4 },
+      },
+    });
+  });
+
+  it("keeps the tab and its groups when the values write fails", async () => {
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.includes("oauth2.googleapis.com/token")) {
+        return jsonRes({ access_token: "tok", expires_in: 3600 });
+      }
+      calls.push({
+        method,
+        url,
+        body: init?.body ? (JSON.parse(String(init.body)) as unknown) : undefined,
+      });
+      if (method === "GET") return jsonRes(weeklyMeta);
+      if (method === "PUT") return jsonRes({ error: "boom" }, 500);
+      return jsonRes({ replies: [] });
+    };
+    const client = createSheetsClient({
+      ...creds,
+      fetch: fetchFn,
+      sleep: async () => undefined,
+    });
+    await expect(
+      client.publishWeeklyTree("sheet_test", header, rows, [
+        { start: 2, end: 4, depth: 1 },
+      ]),
+    ).rejects.toThrow();
+    const serialized = JSON.stringify(calls.map((c) => c.body ?? c.url));
+    expect(serialized).not.toContain("deleteSheet");
+    expect(serialized).not.toContain("deleteDimensionGroup");
+    expect(serialized).not.toContain("addDimensionGroup");
+    const clear = calls.find((c) => c.url.includes(":clear"));
+    expect(decodeURIComponent(clear!.url)).toBe(
+      `https://sheets.googleapis.com/v4/spreadsheets/sheet_test/values/'${WEEKLY_TREE_TAB}':clear`,
+    );
+  });
+
+  it("publishes an empty tree with an unfrozen row under the header", async () => {
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.includes("oauth2.googleapis.com/token")) {
+        return jsonRes({ access_token: "tok", expires_in: 3600 });
+      }
+      calls.push({
+        method,
+        url,
+        body: init?.body ? (JSON.parse(String(init.body)) as unknown) : undefined,
+      });
+      if (method === "GET") return jsonRes({ spreadsheetId: "sheet_test", sheets: [] });
+      if (url.includes(":batchUpdate")) {
+        return jsonRes({ replies: [{ addSheet: { properties: { sheetId: 9 } } }] });
+      }
+      return jsonRes({});
+    };
+    const client = createSheetsClient({
+      ...creds,
+      fetch: fetchFn,
+      sleep: async () => undefined,
+    });
+    await client.publishWeeklyTree("sheet_test", header, [], []);
+
+    const addSheetCall = calls.find((c) =>
+      JSON.stringify(c.body ?? {}).includes("addSheet"),
+    )!;
+    expect(addSheetCall.body).toEqual({
+      requests: [
+        {
+          addSheet: {
+            properties: {
+              title: WEEKLY_TREE_TAB,
+              index: 0,
+              gridProperties: {
+                rowCount: 2,
+                columnCount: 15,
+                frozenRowCount: 1,
+                frozenColumnCount: 1,
+              },
+            },
+          },
+        },
+      ],
+    });
+    const put = calls.find((c) => c.method === "PUT");
+    expect(put?.body).toEqual({ values: [header] });
+  });
+
+  it("republishes on a 15×15 grid without a values range past row 15 or column O", async () => {
+    const tightMeta = {
+      spreadsheetId: "sheet_test",
+      sheets: [
+        {
+          properties: {
+            sheetId: 5,
+            title: WEEKLY_TREE_TAB,
+            index: 0,
+            gridProperties: { rowCount: 15, columnCount: 15 },
+          },
+          rowGroups: [],
+        },
+      ],
+    };
+    const treeRows = Array.from({ length: 14 }, (_, i) => [`r${i}`, i, i + 1, i + 2]);
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.includes("oauth2.googleapis.com/token")) {
+        return jsonRes({ access_token: "tok", expires_in: 3600 });
+      }
+      calls.push({
+        method,
+        url,
+        body: init?.body ? (JSON.parse(String(init.body)) as unknown) : undefined,
+      });
+      if (method === "GET") return jsonRes(tightMeta);
+      return jsonRes({ replies: [] });
+    };
+    const client = createSheetsClient({
+      ...creds,
+      fetch: fetchFn,
+      sleep: async () => undefined,
+    });
+    await client.publishWeeklyTree("sheet_test", header, treeRows, []);
+
+    const valuesCalls = calls.filter((c) => c.url.includes("/values/"));
+    expect(valuesCalls.map((c) => decodeURIComponent(c.url))).toEqual([
+      `https://sheets.googleapis.com/v4/spreadsheets/sheet_test/values/'${WEEKLY_TREE_TAB}':clear`,
+      `https://sheets.googleapis.com/v4/spreadsheets/sheet_test/values/'${WEEKLY_TREE_TAB}'!A1?valueInputOption=RAW`,
+    ]);
+    const update = calls.find((c) => JSON.stringify(c.body ?? {}).includes("updateSheetProperties"))!;
+    const request = (
+      update.body as {
+        requests: {
+          updateSheetProperties: {
+            properties: { gridProperties: { rowCount: number; columnCount: number } };
+          };
+        }[];
+      }
+    ).requests[0].updateSheetProperties;
+    expect(request.properties.gridProperties).toMatchObject({ rowCount: 15, columnCount: 15 });
   });
 });

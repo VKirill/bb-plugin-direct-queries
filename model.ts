@@ -124,6 +124,12 @@ export const pipelineSchema = z
         days: z.number().int().min(1).max(31).default(7),
       })
       .optional(),
+    weeklyTree: z
+      .object({
+        enabled: z.boolean().default(false),
+        weeks: z.number().int().min(1).max(52).default(8),
+      })
+      .optional(),
   })
   .transform((pipe) => ({
     ...pipe,
@@ -210,6 +216,21 @@ export function pipelineJobs(pipeline: ProjectPipeline): Job[] {
       reportDay: "today",
       prelude: "",
       stages: [stage("sync", "Синхронизация", true)],
+      catchUpHours: [],
+      timeoutMin: 60,
+      enabled: true,
+    });
+  }
+  if (pipeline.weeklyTree?.enabled) {
+    jobs.push({
+      id: "weekly-tree",
+      title: "Расходы по неделям",
+      hours: [0, 4, 8, 12, 16, 18, 20],
+      minute: 0,
+      weekdays: ALL_DAYS,
+      reportDay: "today",
+      prelude: "",
+      stages: [stage("weekly-tree", "Расходы по неделям", true)],
       catchUpHours: [],
       timeoutMin: 60,
       enabled: true,

@@ -310,6 +310,50 @@ describe("built-in pipeline schedule", () => {
     await runner.tick();
     expect(started).toEqual(["gamma:2026-11-04", "gamma:2026-11-04"]);
   });
+
+  it("a job id in pipeline.jobs runs its handler instead of pipeline.run", async () => {
+    const store = new MemStore();
+    const host = new FakeHost();
+    seq = 0;
+    const calls: string[] = [];
+    let seenOpts: { trigger?: string; runId?: string; attempt?: number } | undefined;
+    const runner = createRunner({
+      store,
+      host,
+      now: () => currentNow,
+      newRunId: () => `run-${++seq}`,
+      pipeline: {
+        run: async () => {
+          calls.push("run");
+          return [] as LedgerRow[];
+        },
+        sync: async () => {
+          calls.push("sync");
+          return [] as LedgerRow[];
+        },
+        jobs: {
+          "weekly-tree": async (project, day, opts) => {
+            calls.push(`job:${project.id}:${day}`);
+            seenOpts = opts;
+            return [] as LedgerRow[];
+          },
+        },
+      },
+    });
+    const base = fixturePipelineProject();
+    const project: Project = {
+      ...base,
+      pipeline: { ...base.pipeline!, weeklyTree: { enabled: true, weeks: 8 } },
+    };
+    await store.set("projects", [project]);
+    await store.set("settings", fixtureSettings());
+    at(T0300);
+    const started = await runner.start("gamma", "weekly-tree", "2026-11-04", "manual");
+    expect(calls).toEqual(["job:gamma:2026-11-04"]);
+    expect(seenOpts?.trigger).toBe("manual");
+    expect(seenOpts?.runId).toBe(started.runId);
+    expect(host.started).toHaveLength(0);
+  });
 });
 
 describe("seeding", () => {
